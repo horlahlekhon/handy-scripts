@@ -1,0 +1,68 @@
+---
+- name:  file sync between als1 and als2
+  hosts: cron
+  remote_user: root
+  tasks:
+  - name: ensure a list of packages installed
+    yum:
+      name: "{{ packages }}"
+    vars:
+      packages:
+      - tar
+      - libselinux-python
+
+  #check if unison have been installed
+  - stat:
+      path: ~/unison-2.48.4-linux-x86_64-text-static.tar.gz
+    register: result
+
+  - name: Unarchive and use unison file that needs to be downloaded and install in home dir
+    unarchive:
+      src: https://www.urs-mueller.ch/de/computer/download/unison-2.48.4-linux-x86_64-text-static.tar.gz 
+      dest: "{{ansible_env['HOME']}}" 
+      remote_src: yes
+    when: result.stat.exists == false
+
+  - name: create symlink
+    file:
+      src: $HOME/unison-2.48.4-linux-x86_64-text-static
+      dest: /usr/bin/unison
+      state: link
+
+  - name: Create log files
+    file:
+      path: "/home/{{ ansible_user }}/{{ item }}"
+      state: touch
+      mode: '0755'
+      group: vagrant #ubanquity
+      owner: vagrant #ubanquity
+    loop:
+    - /data/ubanquity/log/unison.log
+    - /data/ubanquity/log/unison-output.log
+    - /data/ubanquity/log/unison2.log
+    - /data/ubanquity/log/unison2-output.log
+
+  - name: Set authorized key took from file
+    authorized_key:
+      user: vagrant #ubanquity
+      state: present
+      key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+  
+  - name: set no-password for .ssh directory 
+    command: chcon -R unconfined_u:object_r:ssh_home_t:s0 .ssh/
+
+  - name: cron_job1 for file sync between als1 and als2
+    become_method: su
+    become_user: vagrant  #ubanquity
+    cron:
+      name:  job_1
+      job: vagrant unison -batch -logfile /data/ubanquity/log/unison.log -prefer newer -root /data/ubanquity/image -root ssh://ubuntu//data/ubanquity/image  > /data/ubanquity/log/unison-output.log 2>&1
+      state: present
+
+  - name: cron_job2 for file syn between als1 and als2
+    become_method: su
+    become_user: vagrant #ubanquity
+    cron:
+      name: job_2
+      job: vagrant unison -batch -logfile /data/ubanquity/log/unison2.log -prefer newer -root /data/ubanquity/issues -root ssh://ubuntu//data/ubanquity/issues > /data/ubanquity/log/unison2-output.log 2>&1
+      state: present

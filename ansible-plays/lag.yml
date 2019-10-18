@@ -1,0 +1,46 @@
+---
+- hosts: app_servers
+  become: yes
+  tasks:  
+    - name: create /data
+      file:
+        path: /data
+        state: directory
+        owner: root
+      #  when: "inventory_hostname == groups[app_servers][0]" 
+
+    - name: create table replication_lag if it doesnt exists
+      shell: psql postgres://postgres:postgres@{{ hostvars[groups['app_servers'][0]]['ansible_default_ipv4']['address'] }}/postgres -c "CREATE TABLE IF NOT EXISTS replication_lag(col1 integer);"
+
+    - name: copy script to /data
+      template:
+        src:  replication_lag.sh.j2
+        dest: /data/replication_lag.sh
+        mode: 0644
+      # when: "inventory_hostname == groups[app_severs][0]"
+    
+    - name: copy unit file to /etc/systemd/system
+      copy: 
+        src: replication_lag.service
+        dest: /etc/systemd/system
+        owner: root
+        group: root
+        mode: 0644
+      # when: "inventory_hostname == groups[app_severs][0]"
+
+    - name: register service
+      systemd:
+        name: replication_lag.service
+        daemon_reload: true
+        enabled: true
+        state: started
+      # when: "inventory_hostname == groups[app_severs][0]"
+        
+
+
+
+      
+
+  
+
+
