@@ -91,12 +91,16 @@ fi
 # See /usr/share/doc/bash-doc/examples in the bash-doc package.
 
 if [ -f ~/.bash_aliases ]; then
-    . ~/.bash_aliases 
+    . ~/.bash_aliases
 fi
 
 if [ -f ~/.bash_vars ]; then
     source ~/.bash_vars
-fi  
+fi
+
+if [ -e $HOME/.bash_functions ]; then
+    source $HOME/.bash_functions
+fi
 
 # enable programmable completion features (you don't need to enable
 # this, if it's already enabled in /etc/bash.bashrc and /etc/profile
@@ -111,7 +115,7 @@ fi
 
 export PATH=$PATH:~/bin:~/.local:~/go_projects/bin
 export GOPATH=$HOME/go_projects
-export GOROOT=/usr/lib/go-1.11 
+export GOROOT=/usr/lib/go-1.11
 
 # PS1='[\u@\h \W$(__docker_machine_ps1)]\$ '
 
@@ -119,7 +123,7 @@ export GOROOT=/usr/lib/go-1.11
 if command -v tmux>/dev/null; then
 	[ -z $TMUX ] && exec tmux
 	tmux source-file ~/.tmux.conf
-else 
+else
 	echo "tmux not installed"
 fi
 
@@ -131,8 +135,8 @@ fi
 
 #alias flask='source set_env.sh && flask'
 
-export ORACLE_HOME=~/bin/instantclient_19_3 
-export PATH=$PATH:$ORACLE_HOME 
+export ORACLE_HOME=~/bin/instantclient_19_3
+export PATH=$PATH:$ORACLE_HOME
 
 # >>> conda initialize >>>
 # !! Contents within this block are managed by 'conda init' !!

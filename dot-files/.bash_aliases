@@ -1,4 +1,4 @@
-#!/bin/bash - 
+#!/bin/bash -
 #===============================================================================
 #
 #          FILE: .bash_aliases.sh
@@ -12,7 +12,7 @@
 #          BUGS: ---
 #         NOTES: ---
 #        AUTHOR: Adebari Olalekan Oluwaseun,
-#  ORGANIZATION: 
+#  ORGANIZATION:
 #       CREATED: 26/05/2019 07:37
 #      REVISION:  ---
 #===============================================================================
@@ -35,8 +35,11 @@ alias cp='rsync --progress -r'
 alias modeler='modeler > /dev/null 2>&1 &'
 alias 'conda-nav'='cd ~/anaconda3/bin && ./anaconda-navigator > /dev/null 2>&1 &'
 alias charm='pycharm > /dev/null 2>&1 &'
+alias storm='webstorm > /dev/null 2>&1 &'
+alias grip='datagrip > /dev/null 2>&1 &'
 alias uba='sudo openfortivpn -c ~/openfortivpn.conf'
 alias bpython='python3 -m bpython'
+
 
 
 
@@ -45,6 +48,6 @@ alias pg-camunda='pgcli -U ubanquity -d camunda -p 5433'
 alias pg-dwh='pgcli -U ubanquity -d dwh_zenith -p 5433'
 alias pg-esusu='pgcli -U ubanquity -d esusu -p 5432'
 alias pg-core='pgcli -U ubanquity -d core -p 5432'
-alias pg-postgres='pgcli -U postgres -d postgres -p 5433'
+alias pg-postgres='pgcli -U postgres -d postgres -p 5432'
 alias pg-finance='pgcli -U ubanquity -d finance -p 5433'
 
