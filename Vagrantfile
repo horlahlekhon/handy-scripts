@@ -2,7 +2,7 @@
 Vagrant.configure("2") do |config|
 
   config.vm.define "datamining" do |datamining|
-    datamining.vm.box = "generic/debian9"
+    datamining.vm.box = "debian/buster64"
     datamining.vm.network "private_network", ip: "192.168.10.21"
     datamining.vm.hostname = "datamining"
     datamining.vm.synced_folder "/home/lekan/Documents/workspace/demz/", "/home/vagrant/demz/"
@@ -18,7 +18,7 @@ Vagrant.configure("2") do |config|
   end
 
   config.vm.define "dataprocessing" do |dataprocessing|
-    dataprocessing.vm.box = "generic/debian9"
+    dataprocessing.vm.box = "debian/buster64"
     dataprocessing.vm.network "private_network", ip: "192.168.10.22"
     dataprocessing.vm.hostname = "dataprocessing"
     dataprocessing.vm.synced_folder "/home/lekan/Documents/workspace/demz/", "/home/vagrant/demz/"
@@ -34,7 +34,7 @@ Vagrant.configure("2") do |config|
   end
 
   config.vm.define "mongodb" do |mongodb|
-    mongodb.vm.box = "generic/debian9"
+    mongodb.vm.box = "debian/buster64"
     mongodb.vm.network "private_network", ip: "192.168.10.23"
     mongodb.vm.hostname = "mongodb"
     mongodb.vm.synced_folder "/home/lekan/Documents/workspace/demz/", "/home/vagrant/demz"
@@ -55,7 +55,7 @@ Vagrant.configure("2") do |config|
   end
 
   config.vm.define "whatsapp" do |whatsapp|
-    whatsapp.vm.box = "generic/debian9"
+    whatsapp.vm.box = "debian/buster64"
     whatsapp.vm.network "private_network", ip: "192.168.10.24"
     whatsapp.vm.hostname = "whatsapp"
     whatsapp.vm.synced_folder "/home/lekan/Documents/workspace/demz/", "/home/vagrant/demz/"
@@ -73,7 +73,7 @@ Vagrant.configure("2") do |config|
   end
 
   config.vm.define "frontend" do |frontend|
-    frontend.vm.box = "generic/debian9"
+    frontend.vm.box = "debian/buster64"
     frontend.vm.network "private_network", ip: "192.168.10.25"
     frontend.vm.hostname = "frontend"
     frontend.vm.synced_folder "/home/lekan/Documents/workspace/demz/", "/home/vagrant/demz/"

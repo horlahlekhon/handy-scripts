@@ -25,13 +25,13 @@
 export DW=~/Downloads
 export WP=~/Documents/workspace
 export INT=~/Documents/workspace/ubanquity/integration-project/integration
-export INT3=/home/lekan/Documents/workspace/ubanquity/integration-project-python-3/integration
+export INT3=~/Documents/workspace/ubanquity/integration-project-python-3/integration
 export GOWORK=$GOPATH/src/
 export REX=~/Documents/account_rex/account-REX
 export PY3=~/Documents/workspace/python3/
 export PY2=~/Documents/workspace/python2/
 export UMLET_HOME=~/bin/Umlet
-export GOOGLE_APPLICATION_CREDENTIALS=/home/lekan/Documents/workspace/demz/cosmic-axe-163012-607d58aadab8.json
+export GOOGLE_APPLICATION_CREDENTIALS=~/Documents/workspace/demz/cosmic-axe-163012-607d58aadab8.json
 
 
 

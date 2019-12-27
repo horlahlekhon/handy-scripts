@@ -113,9 +113,7 @@ if ! shopt -oq posix; then
   fi
 fi
 
-export PATH=$PATH:~/bin:~/.local:~/go_projects/bin
-export GOPATH=$HOME/go_projects
-export GOROOT=/usr/lib/go-1.11
+
 
 # PS1='[\u@\h \W$(__docker_machine_ps1)]\$ '
 
@@ -133,35 +131,18 @@ if [ -f "$HOME/.bash-git-prompt/gitprompt.sh" ]; then
 	        source $HOME/.bash-git-prompt/gitprompt.sh
 fi
 
-#alias flask='source set_env.sh && flask'
-
-export ORACLE_HOME=~/bin/instantclient_19_3
-export PATH=$PATH:$ORACLE_HOME
-
-# >>> conda initialize >>>
-# !! Contents within this block are managed by 'conda init' !!
-__conda_setup="$('/home/lekan/anaconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
-if [ $? -eq 0 ]; then
-    eval "$__conda_setup"
-else
-    if [ -f "/home/lekan/anaconda3/etc/profile.d/conda.sh" ]; then
-        . "/home/lekan/anaconda3/etc/profile.d/conda.sh"
-    else
-        export PATH="/home/lekan/anaconda3/bin:$PATH"
-    fi
-fi
-unset __conda_setup
-# <<< conda initialize <<<
-conda deactivate
-
-# Install Ruby Gems to ~/gems
-export GEM_HOME="$HOME/gems"
-export PATH="$HOME/gems/bin:$PATH"
-
-# spark conf
-export SPARK_HOME=~/bin/spark-2.4.3-bin-hadoop2.7
-export PYSPARK_PYTHON=/home/lekan/anaconda3/bin/python3.7
-export PYSPARK_DRIVER_PYTHON=/home/lekan/anaconda3/bin/ipython3
-
 # export ~/.local/bin
 export PATH=$PATH:~/.local/bin
+
+
+# all new customizations for bashrc should be added here, i will review and add the ones that should be permanent and default. this makes our .zshrc clean
+source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bashrc
+
+
+SCRIPTS=~/Documents/workspace/handy-scripts/dot-files/dotfiles
+
+if [[ -d $SCRIPTS ]]; then 
+    for filename in $SCRIPTS/.* ; do 
+        source $filename
+    done
+fi 

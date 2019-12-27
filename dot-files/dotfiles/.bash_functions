@@ -100,6 +100,22 @@ function cl() {
 }
 
 
+# get the program runnning on  a port
 function port(){
     sudo netstat -nlp | grep "$1"
 }
+
+#du: It’s a command
+#-h: Print sizes in human readable format (e.g., 1K, 234M, 2G)
+#-c: Produce a grand total
+#/home/path/directory/: The path of directory
+#sort -rh: Sort the results with numerical value
+#head -2: Output the first 2 lines result which is basically the size of the directory itself and the grand total of all files and directories in it
+#--max-depth=0 : dont show the subdirectories
+function dsize(){
+    #du -hc '$1' | sort -rh | head -2
+    du -h --max-depth=0 "$1"
+}
+
+# source the custom bash functions 
+source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bash_functions

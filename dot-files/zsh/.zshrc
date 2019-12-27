@@ -9,7 +9,7 @@ EDITOR=vim
 # load a random theme each time oh-my-zsh is loaded, in which case,
 # to know which specific one was loaded, run: echo $RANDOM_THEME
 # See https://github.com/robbyrussell/oh-my-zsh/wiki/Themes
-ZSH_THEME="pygmalion"
+ZSH_THEME="avit"
 
 # Set list of themes to pick from when loading at random
 # Setting this variable when ZSH_THEME=random will cause zsh to load
@@ -18,7 +18,7 @@ ZSH_THEME="pygmalion"
 # ZSH_THEME_RANDOM_CANDIDATES=( "robbyrussell" "agnoster" )
 
 # Uncomment the following line to use case-sensitive completion.
-# CASE_SENSITIVE="true"
+CASE_SENSITIVE="true"
 
 # Uncomment the following line to use hyphen-insensitive completion.
 # Case-sensitive completion must be off. _ and - will be interchangeable.
@@ -63,7 +63,7 @@ ZSH_THEME="pygmalion"
 # Custom plugins may be added to ~/.oh-my-zsh/custom/plugins/
 # Example format: plugins=(rails git textmate ruby lighthouse)
 # Add wisely, as too many plugins slow down shell startup.
-plugins=(git extract web-search yum git-extras docker vagrant zsh-navigation-tools virtualenv)
+plugins=(git extract web-search yum git-extras docker vagrant zsh-navigation-tools virtualenv zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting)
 
 source $ZSH/oh-my-zsh.sh
 
@@ -111,7 +111,76 @@ else
 fi
 
 
-if [ -f /home/lekan/.local/lib/python3.5/site-packages/powerline/bindings/zsh/powerline.zsh ]; then
+if [ -f ~/.local/lib/python3.5/site-packages/powerline/bindings/zsh/powerline.zsh ]; then
 	source /home/lekan/.local/lib/python3.5/site-packages/powerline/bindings/zsh/powerline.zsh
 fi
 
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias dir='dir --color=auto'
+    alias vdir='vdir --color=auto'
+
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+if [ -f ~/.bash_aliases ]; then
+    . ~/.bash_aliases
+fi
+
+if [ -f ~/.bash_vars ]; then
+    source ~/.bash_vars
+fi
+
+if [ -e $HOME/.bash_functions ]; then
+    source $HOME/.bash_functions
+fi
+
+# export ~/.local/bin
+export PATH=$PATH:~/.local/bin
+
+# source ~/Documents/workspace/handy-scripts/dot-files/.zshrc
+
+# add auto suggestion
+# plugins=( zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting)
+autoload -U compinit && compinit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ----------------------------------------------------------------------------------------------
+# fix background themes issues in some themes where autosuggestion color is the same as command itself causing confusion... never add anything below this line 
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=60'
+
+
+source ~/Documents/workspace/handy-scripts/dot-files/customs/.zsh-custom
+
+SCRIPTS=~/Documents/workspace/handy-scripts/dot-files/dotfiles
+
+if [[ -d $SCRIPTS ]]; then 
+    for filename in $SCRIPTS/.* ; do 
+        if [[ $filename == *"tmux"* ]]; then 
+        # well, am sorry for not reloading this files, if you need to please do it manually for it is too expensve to do so everytime we load it
+            # tmux source-file $filename
+        elif [[ $filename == *"vimrc"* ]]; then 
+            # we are not loading vim too
+        else 
+            source $filename
+        fi
+    done
+fi 

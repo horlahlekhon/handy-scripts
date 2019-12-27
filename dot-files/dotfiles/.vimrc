@@ -1,4 +1,4 @@
-"so /home/lekan/dotfiles/vim/vimrc.vim
+" so /home/lekan/dotfiles/vim/vimrc.vim
 set nocompatible              " be iMproved, required
 filetype off                  " required
 
