@@ -88,7 +88,8 @@ py() {
 
 
 
-function cl() {
+# this function reimplement `cd` so that when we move to a directory , it automatically list the files
+function cd() {
     DIR="$*";
         # if no DIR given, go home
         if [ $# -lt 1 ]; then
@@ -117,5 +118,22 @@ function dsize(){
     du -h --max-depth=0 "$1"
 }
 
+
+function storage-mode(){
+    if [[ $1 == 'nfs' ]] ; then 
+        export STORAGE_MODE=nfs
+        export LOCAL_BUCKET=/home/lekan/Desktop/smc-v1-dev
+        export LOCAL_MEDIA_FOLDER=media
+        export encryption_key=dev_key
+    elif [[ $1 == 'googleStorage' ]] ; then 
+        export STORAGE_MODE=googleStorage
+        export bucket=smc-v1-dev
+        export media_folder=media
+        export encryption_key=dev_key
+    else 
+        echo 'Please enter a storage type to use'
+    fi
+
+}
 # source the custom bash functions 
 source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bash_functions

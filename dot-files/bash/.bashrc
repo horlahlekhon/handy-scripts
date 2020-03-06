@@ -146,3 +146,6 @@ if [[ -d $SCRIPTS ]]; then
         source $filename
     done
 fi 
+
+export CHROME_DRIVER_PATH=~/Documents/workspace/demz/chromedriver
+export CHROME_BROWSER_PATH=/bin/google-chrome

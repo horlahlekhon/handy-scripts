@@ -98,21 +98,21 @@ source $ZSH/oh-my-zsh.sh
 
 
 # Aliases
-	alias v="vim -p"
-	mkdir -p /tmp/log
+alias v="vim -p"
+mkdir -p /tmp/log
 
 
 # Run tmux if exists
 if command -v tmux>/dev/null; then
-	[ -z $TMUX ] && exec tmux
-	tmux source-file ~/.tmux.conf
-else 
-	echo "tmux not installed"
+    [ -z $TMUX ] && exec tmux
+    tmux source-file ~/.tmux.conf
+else
+    echo "tmux not installed"
 fi
 
 
 if [ -f ~/.local/lib/python3.5/site-packages/powerline/bindings/zsh/powerline.zsh ]; then
-	source /home/lekan/.local/lib/python3.5/site-packages/powerline/bindings/zsh/powerline.zsh
+    source /home/lekan/.local/lib/python3.5/site-packages/powerline/bindings/zsh/powerline.zsh
 fi
 
 if [ -x /usr/bin/dircolors ]; then
@@ -120,7 +120,7 @@ if [ -x /usr/bin/dircolors ]; then
     alias ls='ls --color=auto'
     alias dir='dir --color=auto'
     alias vdir='vdir --color=auto'
-
+    
     alias grep='grep --color=auto'
     alias fgrep='fgrep --color=auto'
     alias egrep='egrep --color=auto'
@@ -140,6 +140,9 @@ fi
 
 # export ~/.local/bin
 export PATH=$PATH:~/.local/bin
+# add go to path
+export PATH=$PATH:/usr/local/go/bin
+export PATH=$PATH:/usr/local/bin
 
 # source ~/Documents/workspace/handy-scripts/dot-files/.zshrc
 
@@ -149,22 +152,12 @@ autoload -U compinit && compinit
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+export CHROME_DRIVER_PATH=~/Documents/workspace/demz/chromedriver
+export CHROME_BROWSER_PATH=/bin/google-chrome
 
 
 # ----------------------------------------------------------------------------------------------
-# fix background themes issues in some themes where autosuggestion color is the same as command itself causing confusion... never add anything below this line 
+# fix background themes issues in some themes where autosuggestion color is the same as command itself causing confusion... never add anything below this line
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=60'
 
 
@@ -172,15 +165,15 @@ source ~/Documents/workspace/handy-scripts/dot-files/customs/.zsh-custom
 
 SCRIPTS=~/Documents/workspace/handy-scripts/dot-files/dotfiles
 
-if [[ -d $SCRIPTS ]]; then 
-    for filename in $SCRIPTS/.* ; do 
-        if [[ $filename == *"tmux"* ]]; then 
-        # well, am sorry for not reloading this files, if you need to please do it manually for it is too expensve to do so everytime we load it
+if [[ -d $SCRIPTS ]]; then
+    for filename in $SCRIPTS/.* ; do
+        if [[ $filename == *"tmux"* ]]; then
+            # well, am sorry for not reloading this files, if you need to please do it manually for it is too expensve to do so everytime we load it
             # tmux source-file $filename
-        elif [[ $filename == *"vimrc"* ]]; then 
+            elif [[ $filename == *"vimrc"* ]]; then
             # we are not loading vim too
-        else 
+        else
             source $filename
         fi
     done
-fi 
+fi

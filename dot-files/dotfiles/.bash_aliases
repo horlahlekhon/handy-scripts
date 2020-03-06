@@ -23,7 +23,7 @@
 # -w "FILE" : FILE exists and write permission is granted
 
 alias ll='ls -l'
-alias la='ls -A'
+alias la='ls -Alha'
 alias l='ls -CF'
 
 
@@ -51,6 +51,7 @@ alias lsblk='lsblk --fs'
 alias inet='ip -c -h -br -a address'
 alias reboot="sudo reboot"
 alias scripts="code ~/Documents/workspace/handy-scripts"
+alias mongui="pushd . && cd ~/.local/bin && ./mongui > /dev/null 2>&1 &"
 
 
 
@@ -66,8 +67,8 @@ alias uba='sudo openfortivpn -c ~/openfortivpn.conf'
 
 
 #aliases specific to demz analytics
-alias whatsapp='cd ~/Documents/workspace/demz/data-mining-services && sbt wsWhatsappMonitoring/run '
-alias deep-proc='cd ~/Documents/workspace/demz/data-mining-services && sbt dataprocessing/run '
-alias deep-mine='cd ~/Documents/workspace/demz/data-mining-services && sbt dataMining/run '
-alias deep-front='cd ~/Documents/workspace/demz/frontend && sails lift'
+alias whatsapp='cd $DEEP_TEST && sbt wsWhatsappMonitoring/run '
+alias deep-proc='cd $DEEP_TEST && sbt dataProcessing/run '
+alias deep-mine='cd $DEEP_TEST && sbt dataMining/run '
+alias deep-front='cd $DEEP_FRONT && npm run start'
 

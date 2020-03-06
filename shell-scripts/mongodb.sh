@@ -38,3 +38,5 @@ mongo core <<\EOF
              ]
   });
 EOF
+
+# Install mongodb gui
