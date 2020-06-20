@@ -33,12 +33,36 @@ export PY2=~/Documents/workspace/python2/
 export UMLET_HOME=~/bin/Umlet
 export GOOGLE_APPLICATION_CREDENTIALS=~/Documents/workspace/demz/cosmic-axe-163012-607d58aadab8.json
 export CHROME_DRIVER_PATH=~/Documents/workspace/demz/chromedriver
+export SSLKEYLOGFILE=~/.ssl_key_log.log
+export KAFKA_HOME=/usr/local/kafka_2.12-2.3.0/bin
+export SPARK_HOME=/usr/local/spark
+
 
 export UMLET_HOME=/home/$USER/bin/Umlet/
-export LOCAL_BUCKET=/home/$USER/Desktop/smc-v1-dev/
-export STORAGE_MODE=nfs
+
 
 # demz
 export DEEP_TEST=/home/lekan/Documents/workspace/demz/demz-experiment/demz-scala-implementation
 export DEEP_MAIN=/home/lekan/Documents/workspace/demz/deepview-fixes/data-mining-services
 export DEEP_FRONT=/home/lekan/Documents/workspace/demz/frontend
+export LOCAL_BUCKET=/home/$USER/Desktop/smc-v1-dev/
+export STORAGE_MODE=nfs
+
+# CoAmana
+
+export MONGO_URI=mongodb://localhost:27017/market-server
+export MONGO_TEST_URI=mongodb://localhost:27017/amanaServer-test
+
+
+# growth
+export SQL_DATABASE=growth
+export SQL_USER=growth
+export SQL_PASSWORD=growth
+export SQL_HOST=127.0.0.1
+export SQL_PORT=5432
+export SQL_ENGINE=django.db.backends.postgresql
+# export HOST=localhost
+export DATABASE=postgres
+export GROWTH_HOME=/home/lekan/Documents/workspace/personal_projects/growth_env/growth
+export PAYSTACK_TEST_SECRET=sk_test_0b7a0b720baab22db76b1ccec889845da5d984bb
+export PAYSTACK_TEST_PUBLIC_KEY=pk_test_62b67b1e85ead92672c4c57777327eae4ff7d6eb

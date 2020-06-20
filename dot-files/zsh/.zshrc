@@ -144,6 +144,9 @@ export PATH=$PATH:~/.local/bin
 export PATH=$PATH:/usr/local/go/bin
 export PATH=$PATH:/usr/local/bin
 
+export PATH=$PATH:/usr/local/spark/bin
+export PATH=$PATH:/usr/local/spark/bin
+
 # source ~/Documents/workspace/handy-scripts/dot-files/.zshrc
 
 # add auto suggestion

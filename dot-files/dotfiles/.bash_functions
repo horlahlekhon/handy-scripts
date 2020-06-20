@@ -1,4 +1,3 @@
-
 #!/bin/bash
 #===============================================================================
 #
@@ -34,11 +33,11 @@ py() {
     if [[ $EDITOR == "" ]] ; then
         EDITOR='code'
     fi
-
+    
     if [ -d $PROJ ] ; then
         cd $PROJ
         if [[ $(ls ../ | grep bin)  == "bin" ]] ; then
-
+            
             echo "Sourcing and activating your environment"
             source ../bin/activate
             echo "opening virtual studio code for your convenience"
@@ -49,7 +48,7 @@ py() {
             echo "opening virtual studio code for your convenience"
             eval $EDITOR .
             elif [[ $( ls | grep "bin") != "bin" || -d $PROJ && $(ls ../ | grep bin) == "bin"  ]] ; then
-
+            
             echo "$PROJ does not have a virtual environment created"
             echo " would you like to create it ?. y/n"
             read ANS
@@ -83,7 +82,7 @@ py() {
     else
         echo "the paths passed is not a directory"
     fi
-
+    
 }
 
 
@@ -91,13 +90,13 @@ py() {
 # this function reimplement `cd` so that when we move to a directory , it automatically list the files
 function cd() {
     DIR="$*";
-        # if no DIR given, go home
-        if [ $# -lt 1 ]; then
-                DIR=$HOME;
+    # if no DIR given, go home
+    if [ $# -lt 1 ]; then
+        DIR=$HOME;
     fi;
     builtin cd "${DIR}" && \
     # use your preferred ls command
-        ls -F --color=auto
+    ls -F --color=auto
 }
 
 
@@ -120,20 +119,46 @@ function dsize(){
 
 
 function storage-mode(){
-    if [[ $1 == 'nfs' ]] ; then 
+    if [[ $1 == 'nfs' ]] ; then
         export STORAGE_MODE=nfs
         export LOCAL_BUCKET=/home/lekan/Desktop/smc-v1-dev
         export LOCAL_MEDIA_FOLDER=media
         export encryption_key=dev_key
-    elif [[ $1 == 'googleStorage' ]] ; then 
+        elif [[ $1 == 'googleStorage' ]] ; then
         export STORAGE_MODE=googleStorage
         export bucket=smc-v1-dev
         export media_folder=media
         export encryption_key=dev_key
-    else 
+    else
         echo 'Please enter a storage type to use'
     fi
-
+    
 }
-# source the custom bash functions 
+# source the custom bash functions
 source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bash_functions
+
+# improve this function to check if kafka and zookeeper is up or not by checking the ports
+function removeTopic(){
+    cd $KAFKA_HOME > /dev/null
+    ./kafka-topics.sh --zookeeper localhost:2181 --delete --topic $1
+}
+
+# TODO improve to detect when a topic is present and that kafka is on
+# This works by setting the data retention time of kafka, the default is 604800000ms
+# so we just set the retention to 1ms and wait for 1s by that time the messages will have been deleted and we
+#  set the retention back to default
+function purgeTopic(){
+    cd $KAFKA_HOME > /dev/null
+    ./kafka-topics.sh --zookeeper localhost:2181 --alter --topic $1 --config retention.ms=1000
+    sleep 1
+    ./kafka-topics.sh --zookeeper localhost:2181 --alter --topic $1 --config retention.ms=604800000
+    
+}
+
+function pg(){
+    if [[ $1 == "stop" ]]; then
+        sudo pg_ctlcluster 11 main stop
+    else
+        sudo pg_ctlcluster 11 main start
+    fi
+}

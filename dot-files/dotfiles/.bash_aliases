@@ -45,14 +45,15 @@ alias charm='pycharm > /dev/null 2>&1 &'
 alias storm='webstorm > /dev/null 2>&1 &'
 alias grip='datagrip > /dev/null 2>&1 &'
 alias bpython='python3 -m bpython'
-alias zoo='/usr/local/kafka/kafka_2.12-2.2.1/bin/zookeeper-server-start.sh /usr/local/kafka/kafka_2.12-2.2.1/config/zookeeper.properties  '
-alias kafka='/usr/local/kafka/kafka_2.12-2.2.1/bin/kafka-server-start.sh /usr/local/kafka/kafka_2.12-2.2.1/config/server.properties   '
+alias zoo='/usr/local/kafka_2.12-2.3.0/bin/zookeeper-server-start.sh /usr/local/kafka_2.12-2.3.0/config/zookeeper.properties  '
+alias kafka='/usr/local/kafka_2.12-2.3.0/bin/kafka-server-start.sh /usr/local/kafka_2.12-2.3.0/config/server.properties   '
 alias lsblk='lsblk --fs'
 alias inet='ip -c -h -br -a address'
 alias reboot="sudo reboot"
 alias scripts="code ~/Documents/workspace/handy-scripts"
 alias mongui="pushd . && cd ~/.local/bin && ./mongui > /dev/null 2>&1 &"
-
+alias fire-night="pushd . && fire > /dev/null 2>&1 &"
+alias inst_cuda='sudo aptitude install nvidia-cuda-toolkit nvidia-opencl-icd'
 
 
 # aliases specific to ubanquity
@@ -71,4 +72,7 @@ alias whatsapp='cd $DEEP_TEST && sbt wsWhatsappMonitoring/run '
 alias deep-proc='cd $DEEP_TEST && sbt dataProcessing/run '
 alias deep-mine='cd $DEEP_TEST && sbt dataMining/run '
 alias deep-front='cd $DEEP_FRONT && npm run start'
+
+
+
 
