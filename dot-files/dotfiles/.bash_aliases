@@ -31,7 +31,7 @@ alias goedit='goedit > /dev/null 2>&1 &'
 alias idea='idea > /dev/null 2>&1 &'
 alias postman='postman > /dev/null 2>&1 &'
 alias uml='umlet'
-alias cp='rsync --progress --no-compress -rhaHAXv'
+# alias cp='rsync --progress -rhaHAXv'  # rsync having issues with mac version
 # Rsync options
 # -a is for archive, which preserves ownership, permissions etc.
 # -v is for verbose, so I can see what's happening (optional)
@@ -45,8 +45,8 @@ alias charm='pycharm > /dev/null 2>&1 &'
 alias storm='webstorm > /dev/null 2>&1 &'
 alias grip='datagrip > /dev/null 2>&1 &'
 alias bpython='python3 -m bpython'
-alias zoo='/usr/local/kafka_2.12-2.3.0/bin/zookeeper-server-start.sh /usr/local/kafka_2.12-2.3.0/config/zookeeper.properties  '
-alias kafka='/usr/local/kafka_2.12-2.3.0/bin/kafka-server-start.sh /usr/local/kafka_2.12-2.3.0/config/server.properties   '
+# alias zoo='/usr/local/kafka_2.12-2.3.0/bin/zookeeper-server-start.sh /usr/local/kafka_2.12-2.3.0/config/zookeeper.properties  '
+# alias kafka='/usr/local/kafka_2.12-2.3.0/bin/kafka-server-start.sh /usr/local/kafka_2.12-2.3.0/config/server.properties   '
 alias lsblk='lsblk --fs'
 alias inet='ip -c -h -br -a address'
 alias reboot="sudo reboot"
@@ -54,6 +54,10 @@ alias scripts="code ~/Documents/workspace/handy-scripts"
 alias mongui="pushd . && cd ~/.local/bin && ./mongui > /dev/null 2>&1 &"
 alias fire-night="pushd . && fire > /dev/null 2>&1 &"
 alias inst_cuda='sudo aptitude install nvidia-cuda-toolkit nvidia-opencl-icd'
+alias purgeImages='docker rmi -f $(docker images -a -q)'
+alias purgeContainers='docker rm -vf $(docker ps -a -q)'
+alias dock-mongo='docker run -d -p 27017:27017 -v ~/data:/data/db mongo'
+# mkdir ~/data && 
 
 
 # aliases specific to ubanquity
@@ -76,3 +80,24 @@ alias deep-front='cd $DEEP_FRONT && npm run start'
 
 
 
+
+
+# MacOs specific aliases
+alias zoo='/usr/local/kafka/bin/zookeeper-server-start.sh /usr/local/kafka/config/zookeeper.properties  '
+alias kafka='/usr/local/kafka/bin/kafka-server-start.sh /usr/local/kafka/config/server.properties   '
+alias mongod=' mongod --dbpath /usr/local/mongodata > /dev/null 2>&1 &'
+
+
+
+
+
+# macos
+alias redis="/Applications/Redis.app/Contents/Resources/Vendor/redis/bin/redis-cli"
+
+# kubernetes
+alias kgp="kubectl get pods"
+alias k="kubectl"
+alias kgd="kubectl get deployments"
+alias kgs="kubectl get svc"
+alias ka="kubectl apply -f"
+alias kd="kubectl describe "

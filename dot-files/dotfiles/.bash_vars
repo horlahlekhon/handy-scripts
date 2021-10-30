@@ -23,7 +23,7 @@
 
 
 export DW=~/Downloads
-export WP=~/Documents/workspace
+export WP=~/workspace
 export INT=~/Documents/workspace/ubanquity/integration-project/integration
 export INT3=~/Documents/workspace/ubanquity/integration-project-python-3/integration
 export GOWORK=$GOPATH/src/
@@ -31,7 +31,7 @@ export REX=~/Documents/account_rex/account-REX
 export PY3=~/Documents/workspace/python3/
 export PY2=~/Documents/workspace/python2/
 export UMLET_HOME=~/bin/Umlet
-export GOOGLE_APPLICATION_CREDENTIALS=~/Documents/workspace/demz/cosmic-axe-163012-607d58aadab8.json
+# export GOOGLE_APPLICATION_CREDENTIALS=~/Documents/workspace/demz/cosmic-axe-163012-607d58aadab8.json
 export CHROME_DRIVER_PATH=~/Documents/workspace/demz/chromedriver
 export SSLKEYLOGFILE=~/.ssl_key_log.log
 export KAFKA_HOME=/usr/local/kafka_2.12-2.3.0/bin
@@ -45,7 +45,7 @@ export UMLET_HOME=/home/$USER/bin/Umlet/
 export DEEP_TEST=/home/lekan/Documents/workspace/demz/demz-experiment/demz-scala-implementation
 export DEEP_MAIN=/home/lekan/Documents/workspace/demz/deepview-fixes/data-mining-services
 export DEEP_FRONT=/home/lekan/Documents/workspace/demz/frontend
-export LOCAL_BUCKET=/home/$USER/Desktop/smc-v1-dev/
+export LOCAL_BUCKET=/Users/mac/Desktop/smc-v1-dev/
 export STORAGE_MODE=nfs
 
 # CoAmana
@@ -55,10 +55,10 @@ export MONGO_TEST_URI=mongodb://localhost:27017/amanaServer-test
 
 
 # growth
-export SQL_DATABASE=growth
-export SQL_USER=growth
-export SQL_PASSWORD=growth
-export SQL_HOST=127.0.0.1
+export SQL_DATABASE=finstable
+export SQL_USER=finstable
+export SQL_PASSWORD=finstable
+export SQL_HOST=0.0.0.0
 export SQL_PORT=5432
 export SQL_ENGINE=django.db.backends.postgresql
 # export HOST=localhost
@@ -66,3 +66,78 @@ export DATABASE=postgres
 export GROWTH_HOME=/home/lekan/Documents/workspace/personal_projects/growth_env/growth
 export PAYSTACK_TEST_SECRET=sk_test_0b7a0b720baab22db76b1ccec889845da5d984bb
 export PAYSTACK_TEST_PUBLIC_KEY=pk_test_62b67b1e85ead92672c4c57777327eae4ff7d6eb
+
+
+# Mac 
+export GOOGLE_APPLICATION_CREDENTIALS=/Users/$(whoami)/workspace/demz/demz/cosmic-axe-163012-607d58aadab8.json
+# export GOOGLE_APPLICATION_CREDENTIALS=/Users/mac/Downloads/ocr-test-288310-9cce0943ca24.json
+# STORAGE_MODE=nfs;LOCAL_BUCKET=/Users/mac/Desktop/smc-v1-dev;LOCAL_MEDIA_FOLDER=media;encryption_key=dev_key;GOOGLE_APPLICATION_CREDENTIALS=/Users/mac/workspace/demz/demz/cosmic-axe-163012-607d58aadab8.json
+
+
+export TESSDATA_PREFIX=/usr/local/share/tessdata
+
+export M2_HOME="/opt/apache-maven-3.8.1"
+export PATH=$PATH:${M2_HOME}/bin:/usr/local/sbin
+
+
+
+
+# mkobo notification
+export PYTHONUNBUFFERED=1
+export POSTGRES_HOST=127.0.0.1
+export POSTGRES_PORT=5432 
+export POSTGRES_USER=postgres 
+export POSTGRES_PASSWORD=postgres 
+export POSTGRES_DB=mkobo_core_api
+export RABBIT_HOST=127.0.0.1
+export RABBIT_PORT=5672 
+export RABBIT_LOGIN=guest 
+export RABBIT_PASS=guest
+export SMTP_HOST="email-smtp.eu-west-2.amazonaws.com"
+export SMTP_PORT="465"
+export SMTP_LOGIN=AKIAZEW6KCSPUOAFT2N2
+export SMTP_PASSWORD=BBKhQjuNZZ7vtH3yyRE4GdF7sgor+IQDecbV5J9XfDAa
+export SENDER_ADDRESS="adebari.olalekan.oluwaseun@gmail.com"
+export SENDER_NAME="Lekan"
+export SMS_API_KEY=875a33889ebfb71497000063b12a07f5274d03e1226faec94f63dbec86fb70a7
+export SENTRY_URL="https://a285c961a20244c2bcf64f6dea5bcff1@o370326.ingest.sentry.io/5635702"
+export DJANGO_SECRET="default"
+export RABBIT_URL="RABBITMQ_URL=amqps://mkobo-rabbitmq-beta:mkobo-rabbitmq-beta2020@b-9f6cf73b-109a-4cf0-b73e-bb59aacb62eb.mq.eu-west-2.amazonaws.com:5671"
+export JWT_SECRET_KEY="super_secret"
+
+# local
+# PYTHONUNBUFFERED=1;SENDER_NAME="Lekan";SENDER_ADDRESS="adebari.olalekan.oluwaseun@gmail.com";SMTP_PASSWORD=BBKhQjuNZZ7vtH3yyRE4GdF7sgor+IQDecbV5J9XfDAa;SMTP_LOGIN=AKIAZEW6KCSPUOAFT2N2;SMTP_PORT="465";SMTP_HOST="email-smtp.eu-west-2.amazonaws.com";POSTGRES_HOST=localhost;POSTGRES_PORT=5432;POSTGRES_USER=postgres;POSTGRES_PASSWORD=postgres;RABBIT_HOST=localhost;RABBIT_PORT=5672;RABBIT_LOGIN=guest;RABBIT_PASS=guest;SENTRY_URL="https://a285c961a20244c2bcf64f6dea5bcff1@o370326.ingest.sentry.io/5635702"
+
+# config with production rabbit
+# PYTHONUNBUFFERED=1;SENDER_NAME="Lekan";SENDER_ADDRESS=adebari.olalekan.oluwaseun@gmail.com;SMTP_PASSWORD=BBKhQjuNZZ7vtH3yyRE4GdF7sgor+IQDecbV5J9XfDAa;SMTP_LOGIN=AKIAZEW6KCSPUOAFT2N2;SMTP_PORT="465";SMTP_HOST="email-smtp.eu-west-2.amazonaws.com";POSTGRES_HOST=localhost;POSTGRES_PORT=5432;POSTGRES_USER=postgres;POSTGRES_PASSWORD=postgres;RABBIT_HOST=b-9f6cf73b-109a-4cf0-b73e-bb59aacb62eb.mq.eu-west-2.amazonaws.com;RABBIT_PORT=5671;RABBIT_LOGIN=mkobo-rabbitmq-beta;RABBIT_PASS=mkobo-rabbitmq-beta2020;JWT_SECRET_KEY=super_secret_places
+
+
+
+# mkobo core api
+export PORT=3333
+export HOST=0.0.0.0
+export NODE_ENV=production
+export APP_KEY=SQTkVsBdCXIsr2A21nqh81vVQk1EygEG
+export SESSION_DRIVER=cookie
+export CACHE_VIEWS=false
+## Database
+export DB_CONNECTION=pg
+export PG_HOST=localhost
+export PG_PORT=5432
+export PG_USER=postgres
+export PG_PASSWORD=postgres
+export PG_DB_NAME=mkobo_core_api
+# SWAGGER
+export SWAGGER_ON=true
+# JWT
+export JWT_SECRET_KEY=super_secret
+# OTP
+export OTP_EXPIRATION=10m
+# RABBITMQ
+export RABBITMQ_URL=amqp://guest:guest@localhost:5672
+# ENCRYPTION
+export ENCRYPTION_SECRET=secret_places
+# BANK_CODE
+export BANK_CODE=51188
+# ACOUNTS
+export BANK_ACCOUNT_FIRST_TWO=76

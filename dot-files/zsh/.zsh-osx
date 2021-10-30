@@ -1,4 +1,5 @@
 
+
 # If you come from bash you might have to change your $PATH.
 # export PATH=$HOME/bin:/usr/local/bin:$PATH
 
@@ -66,7 +67,7 @@ CASE_SENSITIVE="true"
 # Add wisely, as too many plugins slow down shell startup.
 plugins=(git extract web-search yum git-extras docker vagrant zsh-navigation-tools virtualenv zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting)
 
-source $ZSH/oh-my-zsh.sh
+# source $ZSH/oh-my-zsh.sh
 
 # User configuration
 
@@ -145,17 +146,15 @@ export PATH=$PATH:~/.local/bin
 export PATH=$PATH:/usr/local/go/bin
 export PATH=$PATH:/usr/local/bin
 
-export PATH=$PATH:/usr/local/spark/bin
-export PATH=$PATH:/usr/local/spark/bin
-
-# add tesseract
-export PATH=$PATH:/usr/local/bin/convert
+# export PATH=$PATH:/usr/local/spark/bin
+# export PATH=$PATH:/usr/local/spark/bin
+export PATH=$PATH:/Users/mac/Library/Python/3.7/bin
 
 # source ~/Documents/workspace/handy-scripts/dot-files/.zshrc
 
 # add auto suggestion
 # plugins=( zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting)
-autoload -U compinit && compinit
+# autoload -U compinit && compinit
 
 
 
@@ -168,7 +167,7 @@ export CHROME_BROWSER_PATH=/bin/google-chrome
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=60'
 
 
-source ~/Documents/workspace/handy-scripts/dot-files/customs/.zsh-custom
+# source ~/Documents/workspace/handy-scripts/dot-files/customs/.zsh-custom
 
 SCRIPTS=~/Documents/workspace/handy-scripts/dot-files/dotfiles
 
@@ -184,4 +183,9 @@ if [[ -d $SCRIPTS ]]; then
         fi
     done
 fi
+
+source /Users/mac/workspace/handy-scripts/dot-files/dotfiles/.bash_aliases
+source /Users/mac/workspace/handy-scripts/dot-files/dotfiles/.bash_functions
+source /Users/mac/workspace/handy-scripts/dot-files/dotfiles/.bash_vars
+
 

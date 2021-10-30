@@ -96,13 +96,18 @@ function cd() {
     fi;
     builtin cd "${DIR}" && \
     # use your preferred ls command
-    ls -F --color=auto
+    ls -F
 }
 
 
 # get the program runnning on  a port
 function port(){
-    sudo netstat -nlp | grep "$1"
+    SYSTEM_INFO=$(uname -a )
+    if [[ $SYSTEM_INFO == *"Darwin"* ]]; then
+        lsof -nP -iTCP:$1 | grep LISTEN
+    else
+        sudo netstat -nlp | grep "$1"
+    fi
 }
 
 #du: It’s a command
@@ -135,7 +140,7 @@ function storage-mode(){
     
 }
 # source the custom bash functions
-source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bash_functions
+# source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bash_functions
 
 # improve this function to check if kafka and zookeeper is up or not by checking the ports
 function removeTopic(){
@@ -156,9 +161,18 @@ function purgeTopic(){
 }
 
 function pg(){
+    SYSTEM_INFO=$(uname -a )
     if [[ $1 == "stop" ]]; then
-        sudo pg_ctlcluster 11 main stop
+        if [[ $SYSTEM_INFO == *"Darwin"* ]]; then
+            pg_ctl -D /usr/local/var/postgres stop 
+        else
+            sudo pg_ctlcluster 11 main stop
+        fi
     else
-        sudo pg_ctlcluster 11 main start
+        if [[ $SYSTEM_INFO == *"Darwin"* ]]; then
+            pg_ctl -D /usr/local/var/postgres start 
+        else
+             sudo pg_ctlcluster 11 main start
+        fi
     fi
 }
