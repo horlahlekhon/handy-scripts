@@ -123,22 +123,6 @@ function dsize(){
 }
 
 
-function storage-mode(){
-    if [[ $1 == 'nfs' ]] ; then
-        export STORAGE_MODE=nfs
-        export LOCAL_BUCKET=/home/lekan/Desktop/smc-v1-dev
-        export LOCAL_MEDIA_FOLDER=media
-        export encryption_key=dev_key
-        elif [[ $1 == 'googleStorage' ]] ; then
-        export STORAGE_MODE=googleStorage
-        export bucket=smc-v1-dev
-        export media_folder=media
-        export encryption_key=dev_key
-    else
-        echo 'Please enter a storage type to use'
-    fi
-    
-}
 # source the custom bash functions
 # source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bash_functions
 
@@ -175,4 +159,33 @@ function pg(){
              sudo pg_ctlcluster 11 main start
         fi
     fi
+}
+
+function ctx(){
+    if [[ $1 == "prod" || $1 == "production" || $1 == "prd" || $1 == "p" ]]; then
+        kubectl config use-context do-lon1-speed-ensemble-prod
+        kubectl config set-context "$(kubectl config current-context)" --namespace=pilot
+    elif [[ $1 == "stag" || $1 == "stage" || $1 == "staging" || $1 == "s" ]]; then
+        kubectl config use-context do-nyc1-speed-ensemble
+        kubectl config set-context "$(kubectl config current-context)" --namespace=staging
+    else
+        printf  "Cannot determine the context to change to from the following available contexts \n" 
+        kubectl config get-contexts
+    fi
+}
+
+function some_postgres(){
+    # STRT=$(docker start some-postgres)
+    if [[ ! $(docker start some-postgres) ]]; then
+        echo "oops.. no db instance, but dont fret; starting a new instance for you"
+        docker run --name some-postgres -e POSTGRES_PASSWORD=admin -p 5432:5432 -d postgres || exit 2
+        echo "Postgres instance started... your password is 'admin' with user 'postgres'"
+    else
+        echo "cool.. peace out"
+    fi
+}
+
+function kexec(){
+    pod=$1
+    k exec -it "$pod" -- /bin/sh -c bash -il
 }

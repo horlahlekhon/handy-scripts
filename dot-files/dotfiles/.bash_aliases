@@ -30,7 +30,6 @@ alias l='ls -CF'
 alias goedit='goedit > /dev/null 2>&1 &'
 alias idea='idea > /dev/null 2>&1 &'
 alias postman='postman > /dev/null 2>&1 &'
-alias uml='umlet'
 # alias cp='rsync --progress -rhaHAXv'  # rsync having issues with mac version
 # Rsync options
 # -a is for archive, which preserves ownership, permissions etc.
@@ -56,43 +55,9 @@ alias fire-night="pushd . && fire > /dev/null 2>&1 &"
 alias inst_cuda='sudo aptitude install nvidia-cuda-toolkit nvidia-opencl-icd'
 alias purgeImages='docker rmi -f $(docker images -a -q)'
 alias purgeContainers='docker rm -vf $(docker ps -a -q)'
-alias dock-mongo='docker run -d -p 27017:27017 -v ~/data:/data/db mongo'
+alias dock-mongo='docker run -d -p 27017:27017 --name mongo -v ~/data:/data/db mongo'
 # mkdir ~/data && 
-
-
-# aliases specific to ubanquity
-alias pg-camunda='pgcli -U ubanquity -d camunda -p 5433'
-alias pg-dwh='pgcli -U ubanquity -d dwh_zenith -p 5433'
-alias pg-esusu='pgcli -U ubanquity -d esusu -p 5432'
-alias pg-core='pgcli -U ubanquity -d core -p 5432'
-alias pg-postgres='pgcli -U postgres -d postgres -p 5432'
-alias pg-finance='pgcli -U ubanquity -d finance -p 5433'
-alias uba='sudo openfortivpn -c ~/openfortivpn.conf'
-
-
-
-#aliases specific to demz analytics
-alias whatsapp='cd $DEEP_TEST && sbt wsWhatsappMonitoring/run '
-alias deep-proc='cd $DEEP_TEST && sbt dataProcessing/run '
-alias deep-mine='cd $DEEP_TEST && sbt dataMining/run '
-alias deep-front='cd $DEEP_FRONT && npm run start'
-
-
-
-
-
-
-# MacOs specific aliases
-alias zoo='/usr/local/kafka/bin/zookeeper-server-start.sh /usr/local/kafka/config/zookeeper.properties  '
-alias kafka='/usr/local/kafka/bin/kafka-server-start.sh /usr/local/kafka/config/server.properties   '
-alias mongod=' mongod --dbpath /usr/local/mongodata > /dev/null 2>&1 &'
-
-
-
-
-
-# macos
-alias redis="/Applications/Redis.app/Contents/Resources/Vendor/redis/bin/redis-cli"
+alias ip='curl -4 icanhazip.com'
 
 # kubernetes
 alias kgp="kubectl get pods"
@@ -101,3 +66,5 @@ alias kgd="kubectl get deployments"
 alias kgs="kubectl get svc"
 alias ka="kubectl apply -f"
 alias kd="kubectl describe "
+alias k-prod="kubectl config use-context do-lon1-speed-ensemble-prod"
+alias k-stag="kubectl config use-context do-nyc1-speed-ensemble"
