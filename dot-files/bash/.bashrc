@@ -118,12 +118,12 @@ fi
 # PS1='[\u@\h \W$(__docker_machine_ps1)]\$ '
 
 # Run tmux if exists
-if command -v tmux>/dev/null; then
-	[ -z $TMUX ] && exec tmux
-	tmux source-file ~/.tmux.conf
-else
-	echo "tmux not installed"
-fi
+# if command -v tmux>/dev/null; then
+# 	[ -z $TMUX ] && exec tmux
+# 	tmux source-file ~/.tmux.conf
+# else
+# 	echo "tmux not installed"
+# fi
 
 # for making git status shows in bash prompt
 if [ -f "$HOME/.bash-git-prompt/gitprompt.sh" ]; then
@@ -136,18 +136,19 @@ export PATH=$PATH:~/.local/bin
 
 
 # all new customizations for bashrc should be added here, i will review and add the ones that should be permanent and default. this makes our .zshrc clean
-source ~/Documents/workspace/handy-scripts/dot-files/customs/.custom-bashrc
+source ~/workspace/personal/handy-scripts/dot-files/customs/.custom-bashrc
 
 
-SCRIPTS=~/Documents/workspace/handy-scripts/dot-files/dotfiles
+SCRIPTS=~/workspace/personal/handy-scripts/dot-files/dotfiles
 
 if [[ -d $SCRIPTS ]]; then 
     for filename in $SCRIPTS/.* ; do 
-        source $filename
+        
+        if [[ -f "$filename" ]]; then
+            source $filename
+        fi
+        
     done
 fi 
 
-export CHROME_DRIVER_PATH=~/Documents/workspace/demz/chromedriver
-export CHROME_BROWSER_PATH=/bin/google-chrome
-export PATH=$PATH:/usr/local/spark/bin
 

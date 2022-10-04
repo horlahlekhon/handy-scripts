@@ -29,7 +29,7 @@ alias l='ls -CF'
 
 alias goedit='goedit > /dev/null 2>&1 &'
 alias idea='idea > /dev/null 2>&1 &'
-alias postman='postman > /dev/null 2>&1 &'
+# alias postman='postman > /dev/null 2>&1 &'
 # alias cp='rsync --progress -rhaHAXv'  # rsync having issues with mac version
 # Rsync options
 # -a is for archive, which preserves ownership, permissions etc.

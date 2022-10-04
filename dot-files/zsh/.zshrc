@@ -4,9 +4,9 @@
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=60'
 
 
-# source ~/Documents/workspace/handy-scripts/dot-files/customs/.zsh-custom
+source /home/groot/workspace/personal/handy-scripts/dot-files/customs/.custom-bashrc
 
-SCRIPTS=~/workspace/personal/handy-scripts/dot-files/dotfiles
+SCRIPTS=/home/groot/workspace/personal/handy-scripts/dot-files/dotfiles
 
 if [[ -d $SCRIPTS ]]; then
     for filename in $SCRIPTS/.* ; do
