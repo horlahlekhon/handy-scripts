@@ -168,6 +168,9 @@ function ctx(){
     elif [[ $1 == "stag" || $1 == "stage" || $1 == "staging" || $1 == "s" ]]; then
         kubectl config use-context do-nyc1-speed-ensemble
         kubectl config set-context "$(kubectl config current-context)" --namespace=staging
+    elif [[ $1 == "beta" || $1 == "bet" || $1 == "b" || $1 == "be" ]]; then
+        kubectl config use-context do-nyc1-speed-ensemble-beta
+        kubectl config set-context "$(kubectl config current-context)" --namespace=beta
     else
         printf  "Cannot determine the context to change to from the following available contexts \n" 
         kubectl config get-contexts
