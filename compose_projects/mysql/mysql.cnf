@@ -1,0 +1,24 @@
+[mysqld]
+# Enable general query log
+general_log = 1
+general_log_file = /var/log/mysql/general.log
+
+# Enable error log (default is already enabled, but can specify path if desired)
+log_error = /var/log/mysql/error.log
+
+# Enable the slow query log (to capture long-running queries)
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow-query.log
+long_query_time = 1  # log queries that take longer than 1 second
+
+
+# Enable the binary log (if you want to keep track of all changes in the database)
+log_bin = /var/log/mysql/mysql-bin
+server-id = 1
+
+# Additional logging options
+log_slow_admin_statements = 1   # Log slow administrative statements (e.g., CREATE, DROP)
+log_throttle_queries_not_using_indexes = 1  # Log queries that do not use indexes
+
+
+#innodb_force_recovery = 1

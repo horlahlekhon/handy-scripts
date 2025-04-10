@@ -192,3 +192,69 @@ function kexec(){
     pod=$1
     k exec -it "$pod" -- /bin/sh -c bash -il
 }
+
+# AWS
+logs(){
+    service=$1
+    start=$2
+    now=$(date +%s%3N)
+    filter_pattern=$3
+    
+    start_ts=$(date -d "$start hours ago" +%s%3N)
+    # /ecs/monetary-service-consumer
+    if [ "$service" = "events" ]; then
+        group_name="/ecs/maraboo-transaction-event-consumer"
+    elif [ "$service" = "api" ]; then
+        group_name="/ecs/maraboo-api"
+    elif [ "$service" = "consumer" ]; then
+        group_name="/ecs/monetary-service-consumer"
+    elif [ "$service" = "collections" ]; then
+        group_name="/ecs/mb-collections"
+    elif [ "$service" = "payments" ]; then
+        group_name="/ecs/mb-payments"
+    else
+        echo "Valid Service name was not provided: $service"
+        exit 1
+    fi
+    echo "Searching logs from $start hour(s) ago for pattern: $filter_pattern on $group_name"
+
+    aws logs filter-log-events --log-group-name "$group_name"  --query 'events[*].[timestamp,logStreamName,message]' --start-time "$start_ts" --end-time "$now" --filter-pattern "$filter_pattern" --output text
+}
+
+tail(){
+    service=$1
+    since=$2
+    pattern=$3
+    if [ "$service" = "events" ]; then
+        group_name="/ecs/maraboo-transaction-event-consumer"
+    elif [ "$service" = "api" ]; then
+        group_name="/ecs/maraboo-api"
+    elif [ "$service" = "consumer" ]; then
+        group_name="/ecs/monetary-service-consumer"
+    elif [ "$service" = "collections" ]; then
+        group_name="/ecs/mb-collections"
+    elif [ "$service" = "payments" ]; then
+        group_name="/ecs/mb-payments"
+    else
+        echo "Valid Service name was not provided: $service"
+        exit 1
+    fi
+    if [[ $since =~ ^-?[0-9]+$ ]]; then
+        since=$since
+    else
+        since=1
+    fi
+    echo "Tailing logs from $since hour(s) ago, searching for pattern: $filter_pattern on $group_name"
+
+    aws logs tail "$group_name" --filter-pattern "$pattern" --since "${since}h"  --output text --follow
+}
+
+
+restart_ecs(){
+    service=$1
+    aws ecs update-service \
+    --cluster your-cluster-name \
+    --service your-service-name \
+    --task-definition your-task-family:revision \
+    --force-new-deployment
+}

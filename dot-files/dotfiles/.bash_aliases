@@ -39,22 +39,13 @@ alias idea='idea > /dev/null 2>&1 &'
 # --no-compress as there's no lack of bandwidth between local devices
 # --progress so I can see the progress of large files (optional)
 alias modeler='modeler > /dev/null 2>&1 &'
-alias 'conda-nav'='cd ~/anaconda3/bin && ./anaconda-navigator > /dev/null 2>&1 &'
-alias charm='pycharm > /dev/null 2>&1 &'
-alias storm='webstorm > /dev/null 2>&1 &'
-alias grip='datagrip > /dev/null 2>&1 &'
+
 alias bpython='python3 -m bpython'
-# alias zoo='/usr/local/kafka_2.12-2.3.0/bin/zookeeper-server-start.sh /usr/local/kafka_2.12-2.3.0/config/zookeeper.properties  '
-# alias kafka='/usr/local/kafka_2.12-2.3.0/bin/kafka-server-start.sh /usr/local/kafka_2.12-2.3.0/config/server.properties   '
 alias lsblk='lsblk --fs'
 alias inet='ip -c -h -br -a address'
 alias reboot="sudo reboot"
-alias scripts="code ~/Documents/workspace/handy-scripts"
-alias mongui="pushd . && cd ~/.local/bin && ./mongui > /dev/null 2>&1 &"
-alias fire-night="pushd . && fire > /dev/null 2>&1 &"
-alias inst_cuda='sudo aptitude install nvidia-cuda-toolkit nvidia-opencl-icd'
-alias purgeImages='docker rmi -f $(docker images -a -q)'
-alias purgeContainers='docker rm -vf $(docker ps -a -q)'
+alias scripts="code ~/workspace/personal/handy-scripts"
+
 alias dock-mongo='docker run -d -p 27017:27017 --name mongo -v ~/data:/data/db mongo'
 # mkdir ~/data && 
 alias ip='curl -4 icanhazip.com'
@@ -68,3 +59,40 @@ alias ka="kubectl apply -f"
 alias kd="kubectl describe "
 alias k-prod="kubectl config use-context do-lon1-speed-ensemble-prod"
 alias k-stag="kubectl config use-context do-nyc1-speed-ensemble"
+
+
+# file handling
+alias rm='rm -i'
+alias untar='tar -zxvf'
+alias tar='tar -zcvf'
+
+
+
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../../'
+alias ....='cd ../../../'
+alias c="clear"
+
+# Networking
+alias ports='sudo netstat -tulanp'
+alias ping='ping -c 5'
+alias vpn='sudo openfortivpn -c /home/olalekan/workspace/workstuff/sterling/config'
+alias vd='forticlient vpn disconnect'
+alias vs='forticlient vpn status'
+
+# git
+alias gl='git log --oneline --graph --decorate' # display log of git in a graphical format
+alias gpl="git pull"
+alias gps="git pull && git push"
+alias gs="git status"
+alias gd="git diff"
+
+# docker
+alias docker-prune="docker system prune --all -f && docker volume prune -f"
+alias docker-stop="docker stop $(docker ps -a -q)"
+alias docker-rm="docker rm $(docker ps -a -q)"
+alias docker-rmi="docker rmi $(docker images -a -q)"
+alias purgeImages='docker rmi -f $(docker images -a -q)'
+alias purgeContainers='docker rm -vf $(docker ps -a -q)'
+
