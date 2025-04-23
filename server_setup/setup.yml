@@ -1,0 +1,100 @@
+---
+- name: Add new sudo user
+  hosts: all
+  become: true
+  tasks:
+    - name: Hash the password
+      ansible.builtin.set_fact:
+        user_password: "{{ sudo_user_password | password_hash('sha512') }}"
+
+    - name: Create user with password
+      ansible.builtin.user:
+        name: "{{ sudo_user }}"
+        password: "{{ user_password }}"
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Add user to sudo group
+      user:
+        name: "{{ sudo_user }}"
+        groups: sudo
+        append: yes
+
+- name: "Install Nginx and certbot"
+  hosts: all
+  become: true
+  tasks:
+    - name: "Install Nginx"
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: "Start Nginx"
+      service:
+        name: nginx
+        state: started
+        enabled: true
+    - name: "Update APT cache"
+      apt:
+        update_cache: yes
+
+    - name: "Install Certbox"
+      apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+- name: "Install Docker"
+  hosts: all
+  become: true
+  tasks:
+    - name: Install required dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+    
+    - name: Download Docker GPG key
+      shell: curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+      become: true
+
+    - name: Add Docker repository
+      shell: add-apt-repository -y "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+      become: true
+
+    - name: Install Docker CE (Community Edition)
+      apt:
+        name: docker-ce
+        state: present
+
+    - name: Ensure Docker service is started and enabled
+      service:
+        name: docker
+        state: started
+        enabled: yes
+    
+    - name: Add user to sudo group
+      user:
+        name: "{{ sudo_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose (from the official script)
+      shell: >
+        curl -L https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose
+      args:
+        creates: /usr/local/bin/docker-compose
+
+    - name: Make Docker Compose executable
+      file:
+        path: /usr/local/bin/docker-compose
+        mode: 'u+x'
+
+
+
+
