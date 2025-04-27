@@ -95,6 +95,79 @@
         path: /usr/local/bin/docker-compose
         mode: 'u+x'
 
+- name: Prepare and run Aplication
+  hosts: all
+  become: true
+  collections:
+    - community.docker
+  tasks:
+    - name: Copy application files that will include docker compose and all
+      ansible.posix.synchronize:
+        src: application_files/
+        dest: /home/admin/
+        recursive: yes
 
 
+    - name: List contents of home
+      ansible.builtin.find:
+        paths: /home/"{{ sudo_user }}"/
+      register: files_in_home
 
+    - name: Show the files
+      ansible.builtin.debug:
+        var: files_in_home.files
+
+    - name: Deploy services with docker-compose
+      community.docker.docker_compose_v2:
+        project_src: /home/"{{ sudo_user }}"/{{ app.directory }}
+      loop: "{{ applications }}"
+      loop_control:
+        loop_var: app
+        label: "{{ app.directory }} ({{ app.port }})"
+
+    - name: Wait for app to be reachable
+      ansible.builtin.wait_for:
+        port: "{{ app.port }}"
+        host: "127.0.0.1"
+        timeout: "{{ app.timeout: }}"
+      loop: "{{ applications }}"
+      loop_control:
+        loop_var: app
+      
+
+  
+- name: Install nginx configuration file and generate ssl ca-certificates
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Deploy nginx config from template
+      ansible.builtin.template:
+        src: templates/nginx.conf.jinja
+        dest: "{{ nginx_configuration_file_path }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create symlink
+      ansible.builtin.file:
+        src: "{{ nginx_configuration_file_path }}"
+        dest: /etc/nginx/sites-enabled/{{ server_name }}
+        state: link
+
+    - name: Restart nginx with systemd
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+    
+    - name: Generate ca-certificates
+      ansible.builtin.shell: >
+        certbot --nginx -d {{ server_name }} --non-interactive --agree-tos -m {{ acme_email }}
+      args:
+        creates: /etc/letsencrypt/live/{{ server_name }}/fullchain.pem
+      register: certbot_result
+      ignore_errors: yes
+      when: false # Set to true if you want to generate the certificates automatically
+        
