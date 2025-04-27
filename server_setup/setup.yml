@@ -102,10 +102,11 @@
     - community.docker
   tasks:
     - name: Copy application files that will include docker compose and all
-      ansible.posix.synchronize:
-        src: application_files/
+      ansible.builtin.copy:
+        src: application_files
         dest: /home/admin/
-        recursive: yes
+        mode: '0644'
+        directory_mode: '0755'
 
 
     - name: List contents of home
@@ -115,7 +116,7 @@
 
     - name: Show the files
       ansible.builtin.debug:
-        var: files_in_home.files
+        var: files_in_home
 
     - name: Deploy services with docker-compose
       community.docker.docker_compose_v2:
@@ -129,7 +130,7 @@
       ansible.builtin.wait_for:
         port: "{{ app.port }}"
         host: "127.0.0.1"
-        timeout: "{{ app.timeout: }}"
+        timeout: 30
       loop: "{{ applications }}"
       loop_control:
         loop_var: app
