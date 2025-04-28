@@ -1,8 +1,9 @@
 sudo_user: admin
 sudo_user_password: admin
 server_name: dev.mara.boo
-nginx_configuration_file_path: /etc/nginx/sites-available/hosted.domain.gru
-server_port: 80
+servers:
+  - {"name": "dev.mara.boo", "port": 3000}
+  - {"name": "stg.mara.boo", "port": 3001}
 acme_email: horlahlekhon@gmail.com
 applications:
   - {"directory": "redis", "port": 6379, "timeout": 30}

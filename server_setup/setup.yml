@@ -111,7 +111,8 @@
 
     - name: List contents of home
       ansible.builtin.find:
-        paths: /home/"{{ sudo_user }}"/
+        paths: /home/{{ sudo_user }}/
+        recurse: yes
       register: files_in_home
 
     - name: Show the files
@@ -120,7 +121,7 @@
 
     - name: Deploy services with docker-compose
       community.docker.docker_compose_v2:
-        project_src: /home/"{{ sudo_user }}"/{{ app.directory }}
+        project_src: /home/{{ sudo_user }}/application_files/{{ app.directory }}
       loop: "{{ applications }}"
       loop_control:
         loop_var: app
@@ -145,16 +146,27 @@
     - name: Deploy nginx config from template
       ansible.builtin.template:
         src: templates/nginx.conf.jinja
-        dest: "{{ nginx_configuration_file_path }}"
+        dest: /etc/nginx/sites-available/"{{ server.name }}"
         owner: root
         group: root
         mode: '0644'
+      loop: "{{ servers }}"
+      loop_control:
+        loop_var: server
+        label: "{{ server.name }} ({{ server.port }})"
+      vars:
+        server_name: "{{ server.name }}"
+        server_port: "{{ server.port }}"
 
-    - name: Create symlink
+    - name: Create symlink for nginx config to sites-enabled
       ansible.builtin.file:
-        src: "{{ nginx_configuration_file_path }}"
-        dest: /etc/nginx/sites-enabled/{{ server_name }}
+        src: /etc/nginx/sites-available/"{{ server.name }}"
+        dest: /etc/nginx/sites-enabled/{{ server.name }}
         state: link
+      loop: "{{ servers }}"
+      loop_control:
+        loop_var: server
+        label: "{{ server.name }} ({{ server.port }})"
 
     - name: Restart nginx with systemd
       ansible.builtin.systemd:
@@ -162,7 +174,8 @@
         state: restarted
         enabled: yes
         daemon_reload: yes
-    
+
+    # we need to loop through the servers to generate the certificates
     - name: Generate ca-certificates
       ansible.builtin.shell: >
         certbot --nginx -d {{ server_name }} --non-interactive --agree-tos -m {{ acme_email }}
