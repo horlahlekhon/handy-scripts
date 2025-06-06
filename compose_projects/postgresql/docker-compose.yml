@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: dev-postgres
+    environment:
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: devdb
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - devnet
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "devuser"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  odyssey:
+    image: k0new/odyssey:latest
+    container_name: dev-odyssey
+    depends_on:
+      - postgres
+    ports:
+      - "6432:6432"  # Odyssey default port
+    volumes:
+      - ./odyssey/odyssey.conf:/etc/odyssey/odyssey.conf
+    networks:
+      - devnet
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  devnet:
+    driver: bridge
