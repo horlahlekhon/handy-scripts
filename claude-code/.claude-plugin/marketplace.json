@@ -1,0 +1,15 @@
+{
+  "name": "olalekan-config",
+  "description": "Personal Claude Code configuration marketplace",
+  "owner": {
+    "name": "Olalekan Adebari"
+  },
+  "plugins": [
+    {
+      "name": "olalekan-config",
+      "description": "Personal Claude Code config: skills, rules, and patterns for Python/Java/Go/TS/Scala stack",
+      "version": "1.0.0",
+      "source": "./"
+    }
+  ]
+}

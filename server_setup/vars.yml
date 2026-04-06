@@ -1,9 +1,9 @@
 sudo_user: admin
-sudo_user_password: admin
-server_name: dev.mara.boo
+sudo_user_password: IUKKIl4NEHJl1akWpF5Z
+server_name: showroom360.app
 servers:
-  - {"name": "dev.mara.boo", "port": 3000}
-  - {"name": "stg.mara.boo", "port": 3001}
+  - {"name": "showroom360.app", "port": 3000}
+  - {"name": "api.showroom360.app", "port": 8000}
 acme_email: horlahlekhon@gmail.com
 applications:
   - {"directory": "redis", "port": 6379, "timeout": 30}

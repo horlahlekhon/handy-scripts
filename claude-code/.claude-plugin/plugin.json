@@ -1,0 +1,9 @@
+{
+  "name": "olalekan-config",
+  "description": "Personal Claude Code config: skills, rules, and patterns for Python/Java/Go/TS/Scala stack",
+  "version": "1.0.0",
+  "author": {
+    "name": "Olalekan Adebari"
+  },
+  "license": "MIT"
+}

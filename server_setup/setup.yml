@@ -95,46 +95,46 @@
         path: /usr/local/bin/docker-compose
         mode: 'u+x'
 
-- name: Prepare and run Aplication
-  hosts: all
-  become: true
-  collections:
-    - community.docker
-  tasks:
-    - name: Copy application files that will include docker compose and all
-      ansible.builtin.copy:
-        src: application_files
-        dest: /home/admin/
-        mode: '0644'
-        directory_mode: '0755'
+# - name: Prepare and run Aplication
+#   hosts: all
+#   become: true
+#   collections:
+#     - community.docker
+#   tasks:
+#     - name: Copy application files that will include docker compose and all
+#       ansible.builtin.copy:
+#         src: application_files
+#         dest: /home/admin/
+#         mode: '0644'
+#         directory_mode: '0755'
 
 
-    - name: List contents of home
-      ansible.builtin.find:
-        paths: /home/{{ sudo_user }}/
-        recurse: yes
-      register: files_in_home
+#     - name: List contents of home
+#       ansible.builtin.find:
+#         paths: /home/{{ sudo_user }}/
+#         recurse: yes
+#       register: files_in_home
 
-    - name: Show the files
-      ansible.builtin.debug:
-        var: files_in_home
+#     - name: Show the files
+#       ansible.builtin.debug:
+#         var: files_in_home
 
-    - name: Deploy services with docker-compose
-      community.docker.docker_compose_v2:
-        project_src: /home/{{ sudo_user }}/application_files/{{ app.directory }}
-      loop: "{{ applications }}"
-      loop_control:
-        loop_var: app
-        label: "{{ app.directory }} ({{ app.port }})"
+#     - name: Deploy services with docker-compose
+#       community.docker.docker_compose_v2:
+#         project_src: /home/{{ sudo_user }}/application_files/{{ app.directory }}
+#       loop: "{{ applications }}"
+#       loop_control:
+#         loop_var: app
+#         label: "{{ app.directory }} ({{ app.port }})"
 
-    - name: Wait for app to be reachable
-      ansible.builtin.wait_for:
-        port: "{{ app.port }}"
-        host: "127.0.0.1"
-        timeout: 30
-      loop: "{{ applications }}"
-      loop_control:
-        loop_var: app
+#     - name: Wait for app to be reachable
+#       ansible.builtin.wait_for:
+#         port: "{{ app.port }}"
+#         host: "127.0.0.1"
+#         timeout: 30
+#       loop: "{{ applications }}"
+#       loop_control:
+#         loop_var: app
       
 
   

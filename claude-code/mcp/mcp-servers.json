@@ -1,0 +1,94 @@
+{
+  "mcpServers": {
+    "jira": {
+      "command": "uvx",
+      "args": ["mcp-atlassian==0.21.0"],
+      "env": {
+        "JIRA_URL": "YOUR_JIRA_URL_HERE",
+        "JIRA_EMAIL": "YOUR_JIRA_EMAIL_HERE",
+        "JIRA_API_TOKEN": "YOUR_JIRA_API_TOKEN_HERE"
+      },
+      "description": "Jira issue tracking — search, create, update, comment, transition issues"
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "YOUR_GITHUB_PAT_HERE"
+      },
+      "description": "GitHub operations - PRs, issues, repos"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "description": "Persistent memory across sessions"
+    },
+    "omega-memory": {
+      "command": "uvx",
+      "args": ["omega-memory", "serve"],
+      "description": "Persistent agent memory with semantic search, multi-agent coordination, and knowledge graphs — run via uvx (richer than the basic memory store)"
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "description": "Chain-of-thought reasoning"
+    },
+    "exa-web-search": {
+      "command": "npx",
+      "args": ["-y", "exa-mcp-server"],
+      "env": {
+        "EXA_API_KEY": "YOUR_EXA_API_KEY_HERE"
+      },
+      "description": "Web search, research, and data ingestion via Exa API — prefer task-scoped use for broader research after GitHub search and primary docs"
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"],
+      "description": "Live documentation lookup — use with /docs command and documentation-lookup skill (resolve-library-id, query-docs)."
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/YOUR_USERNAME/projects"],
+      "description": "Filesystem operations — set the path to your projects root, e.g. /home/username/projects or $HOME/projects"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp", "--browser", "chrome"],
+      "description": "Browser automation and testing via Playwright"
+    },
+    "devfleet": {
+      "type": "http",
+      "url": "http://localhost:18801/mcp",
+      "description": "Multi-agent orchestration — dispatch parallel Claude Code agents in isolated worktrees. Plan projects, auto-chain missions, read structured reports. Repo: https://github.com/LEC-AI/claude-devfleet"
+    },
+    "token-optimizer": {
+      "command": "npx",
+      "args": ["-y", "token-optimizer-mcp"],
+      "description": "Token optimization for 95%+ context reduction via content deduplication and compression"
+    }
+  },
+  "_comments": {
+    "usage": "Copy the servers you need to your ~/.claude.json mcpServers section",
+    "env_vars": "Replace YOUR_*_HERE placeholders with actual values",
+    "disabling": "Use ECC_DISABLED_MCPS=github,context7,... to disable bundled ECC MCPs during install/sync, or use disabledMcpServers in project config for per-project overrides",
+    "context_warning": "Keep under 10 MCPs enabled to preserve context window"
+  },
+  "_recommended_start": {
+    "description": "Enable these 3 first — they cover the most common workflows",
+    "servers": ["github", "context7", "sequential-thinking"]
+  },
+  "_optional": {
+    "devfleet": "Multi-agent parallelism — requires running the DevFleet server locally (see repo link in description)",
+    "exa-web-search": "Deep web research — useful when GitHub search + Context7 docs are insufficient",
+    "playwright": "Browser automation and E2E testing",
+    "omega-memory": "Richer memory with semantic search — use instead of basic 'memory' server",
+    "jira": "Issue tracking — useful if your team uses Jira",
+    "token-optimizer": "Reduces context token usage — helpful for very large codebases",
+    "filesystem": "Direct filesystem access — set path to your projects root before enabling"
+  },
+  "_setup_guide": {
+    "github": "Create a PAT at https://github.com/settings/tokens — required scopes: repo, read:org",
+    "jira": "API token from https://id.atlassian.com/manage-profile/security/api-tokens — use your Jira login email",
+    "exa-web-search": "API key from https://exa.ai — sign up for a free or paid plan"
+  }
+}
