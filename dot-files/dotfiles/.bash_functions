@@ -258,3 +258,8 @@ restart_ecs(){
     --task-definition your-task-family:revision \
     --force-new-deployment
 }
+
+# AWS
+cloudwatch() {
+    python3 "$HOME/workspace/personal/handy-scripts/python_scripts/query_cloudwatch.py" "$@"
+}
