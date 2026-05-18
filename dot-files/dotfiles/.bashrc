@@ -16,11 +16,13 @@ _HANDY_SCRIPTS="$(cd "$_DOTFILES_DIR/../.." && pwd)"
 
 # ── History ────────────────────────────────────────────────────────────────────
 HISTCONTROL=ignoreboth
-shopt -s histappend
 HISTSIZE=5000
 HISTFILESIZE=10000
 
-shopt -s checkwinsize
+if [ -n "$BASH_VERSION" ]; then
+    shopt -s histappend
+    shopt -s checkwinsize
+fi
 
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 case "$TERM" in
@@ -76,7 +78,7 @@ fi
 unset _DOTFILES_DIR _HANDY_SCRIPTS _CUSTOMS_DIR _f
 
 # ── Completions ────────────────────────────────────────────────────────────────
-if ! shopt -oq posix; then
+if [ -n "$BASH_VERSION" ] && ! shopt -oq posix; then
     if [ -f /usr/share/bash-completion/bash_completion ]; then
         . /usr/share/bash-completion/bash_completion
     elif [ -f /etc/bash_completion ]; then
