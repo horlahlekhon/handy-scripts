@@ -169,13 +169,28 @@ def test_symlinked_db_path_rejected(tmp_path):
 def test_symlinked_parent_dir_rejected(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
-    real.chmod(0o755)
     link = tmp_path / "link"
     link.symlink_to(real)
     with pytest.raises(StoreError):
         Store(link / "events.db")
-    assert stat.S_IMODE(real.stat().st_mode) == 0o755
     assert list(real.iterdir()) == []
+
+
+def test_symlinked_ancestor_dir_rejected(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(StoreError):
+        Store(tmp_path / "link" / "sub" / "events.db")
+    assert list(real.iterdir()) == []
+
+
+def test_hardlinked_db_rejected(tmp_path):
+    p = tmp_path / "e.db"
+    Store(p).close()
+    (tmp_path / "other").hardlink_to(p)
+    with pytest.raises(StoreError):
+        Store(p)
 
 
 def test_existing_loose_db_tightened_to_0600(tmp_path):
@@ -186,11 +201,19 @@ def test_existing_loose_db_tightened_to_0600(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
 
-def test_parent_dir_mode_0700(tmp_path):
+def test_parent_dir_created_0700(tmp_path):
     d = tmp_path / "data"
-    d.mkdir(mode=0o755)
     Store(d / "e.db").close()
     assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
+def test_loose_existing_parent_dir_rejected(tmp_path):
+    d = tmp_path / "data"
+    d.mkdir()
+    d.chmod(0o777)
+    with pytest.raises(StoreError):
+        Store(d / "e.db")
+    assert stat.S_IMODE(d.stat().st_mode) == 0o777
 
 
 def test_snapshot_pid_roundtrips_independently_of_event_pid(tmp_path, store):

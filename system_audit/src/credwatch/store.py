@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 
+from credwatch.safe_fs import UnsafePathError, open_dir_chain
 from credwatch.models import Connection, NetworkSnapshot, ProcessedEvent, ProcessInfo
 
 logger = logging.getLogger(__name__)
@@ -125,33 +126,23 @@ def _proc_to_dict(p: ProcessInfo) -> dict:
     return {"pid": p.pid, "exe": p.exe, "cmdline": list(p.cmdline)}
 
 
-def _prepare_dir(parent: Path) -> None:
-    """Create parent as a real 0700 directory owned by us; never follow symlinks."""
-    parent.mkdir(parents=True, exist_ok=True)
-    st = os.lstat(parent)
-    if not stat.S_ISDIR(st.st_mode):
-        raise StoreError(f"{parent} is not a real directory (symlink?)")
-    if st.st_uid != os.geteuid():
-        raise StoreError(f"{parent} is not owned by uid {os.geteuid()}")
-    os.chmod(parent, DB_DIR_MODE)
-    if stat.S_IMODE(os.lstat(parent).st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
-        raise StoreError(f"{parent} is group/other writable")
-
-
-def _open_db_file(db_path: Path) -> None:
-    """Create/open the db file without following symlinks, forcing mode 0600."""
+def _open_db_file(dir_fd: int, db_path: Path) -> os.stat_result:
+    """Create/open the db file relative to dir_fd without following symlinks."""
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        fd = os.open(db_path, flags, DB_FILE_MODE)
+        fd = os.open(db_path.name, flags, DB_FILE_MODE, dir_fd=dir_fd)
     except OSError as exc:
         raise StoreError(f"cannot safely open {db_path}: {exc.strerror}") from exc
     try:
         os.fchmod(fd, DB_FILE_MODE)
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
-            raise StoreError(f"{db_path} is not a regular file owned by uid {os.geteuid()}")
     finally:
         os.close(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        raise StoreError(
+            f"{db_path} must be a regular, euid-owned file with a single link"
+        )
+    return st
 
 
 def _row_to_event(r: tuple) -> EventRow:
@@ -178,14 +169,34 @@ def _row_to_event(r: tuple) -> EventRow:
 class Store:
     def __init__(self, db_path: Path) -> None:
         db_path = Path(db_path)
-        _prepare_dir(db_path.parent)
-        _open_db_file(db_path)
-        self._conn = sqlite3.connect(db_path)
+        try:
+            self._dir_fd = open_dir_chain(db_path.parent, create_mode=DB_DIR_MODE)
+        except UnsafePathError as exc:
+            raise StoreError(str(exc)) from exc
+        try:
+            st = _open_db_file(self._dir_fd, db_path)
+            self._conn = self._connect(db_path, st)
+        except BaseException:
+            os.close(self._dir_fd)
+            raise
         try:
             self._init_schema()
-        except Exception:
-            self._conn.close()
+        except BaseException:
+            self.close()
             raise
+
+    def _connect(self, db_path: Path, st: os.stat_result) -> sqlite3.Connection:
+        if os.path.isdir("/proc/self/fd"):
+            return sqlite3.connect(f"/proc/self/fd/{self._dir_fd}/{db_path.name}")
+        conn = sqlite3.connect(db_path)
+        try:
+            now = os.lstat(db_path)
+            if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+                raise StoreError(f"{db_path} changed while opening")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
 
     def _init_schema(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -202,6 +213,7 @@ class Store:
 
     def close(self) -> None:
         self._conn.close()
+        os.close(self._dir_fd)
 
     def record(self, pe: ProcessedEvent) -> int:
         ev, snap = pe.event, pe.snapshot
