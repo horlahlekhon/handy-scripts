@@ -15,7 +15,7 @@ from credwatch.platform_info import TargetUser, default_data_dir
 logger = logging.getLogger(__name__)
 
 CREDENTIAL_KEYS = frozenset({"password", "smtp_password", "smtp_user", "user", "username", "secret", "token"})
-CANARY_PROCESSES = ("credwatch", "python3*")
+CANARY_PROCESSES = ("credwatch",)
 
 
 class ConfigError(ValueError):
@@ -223,6 +223,8 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
         return {}
     except OSError as exc:
         raise ConfigError(f"{path}: cannot read config ({exc.strerror})") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: config is not valid UTF-8") from exc
     try:
         loaded = yaml.safe_load(text)
     except yaml.YAMLError as exc:

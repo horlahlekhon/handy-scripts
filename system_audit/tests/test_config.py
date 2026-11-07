@@ -46,11 +46,14 @@ def test_missing_file_uses_defaults(tmp_path, target):
     assert cfg.email.digest_hour == 8
 
 
-def test_canary_rule_always_appended(tmp_path, target, home):
-    cfg = load_config(_write(tmp_path, {"allowlist": []}), "linux", target)
-    assert cfg.allowlist[-1] == AllowRule(
-        str(home / ".local/share/credwatch/canary"), ("credwatch", "python3*")
-    )
+@pytest.mark.parametrize(
+    "os_name,suffix",
+    [("linux", ".local/share/credwatch"), ("darwin", "Library/Application Support/credwatch")],
+)
+def test_canary_rule_always_appended(tmp_path, target, home, os_name, suffix):
+    cfg = load_config(_write(tmp_path, {"allowlist": []}), os_name, target)
+    assert cfg.allowlist[-1] == AllowRule(str(home / suffix / "canary"), ("credwatch",))
+    assert cfg.allowlist[-1].processes == ("credwatch",)
 
 
 def test_yaml_overrides_merge_deeply(tmp_path, target):
@@ -125,4 +128,11 @@ def test_malformed_yaml_rejected(tmp_path, target):
     p = tmp_path / "c.yaml"
     p.write_text("a: [unclosed\n")
     with pytest.raises(ConfigError):
+        load_config(p, "linux", target)
+
+
+def test_invalid_utf8_rejected(tmp_path, target):
+    p = tmp_path / "c.yaml"
+    p.write_bytes(b"a: \xff\xfe\n")
+    with pytest.raises(ConfigError, match="UTF-8"):
         load_config(p, "linux", target)
