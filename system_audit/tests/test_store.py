@@ -1,0 +1,153 @@
+import stat
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from credwatch.models import (
+    Connection,
+    FileAccessEvent,
+    NetworkSnapshot,
+    ProcessedEvent,
+    ProcessInfo,
+    Verdict,
+)
+import pytest
+
+from credwatch.store import DailySummary, Store
+
+UTC = timezone.utc
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = Store(tmp_path / "e.db")
+    yield s
+    s.close()
+
+
+def make_pe(
+    ts,
+    path="/home/u/.ssh/id_rsa",
+    exe="/usr/bin/cat",
+    comm="cat",
+    allowed=False,
+    rule=None,
+    snapshot=None,
+):
+    ev = FileAccessEvent(
+        timestamp=ts, path=path, pid=100, ppid=1, exe=exe, comm=comm,
+        success=True, backend="linux_audit", raw="raw line",
+    )
+    return ProcessedEvent(event=ev, verdict=Verdict(allowed, rule), snapshot=snapshot)
+
+
+def test_record_and_query_since(tmp_path):
+    store = Store(tmp_path / "sub" / "events.db")
+    try:
+        _check_since(store)
+    finally:
+        store.close()
+
+
+def _check_since(store):
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    store.record(make_pe(t0))
+    store.record(make_pe(t0 + timedelta(hours=1), path="/b"))
+    rows = store.events_since(t0 + timedelta(minutes=30))
+    assert [r.path for r in rows] == ["/b"]
+    assert rows[0].ts.tzinfo is not None
+    assert rows[0].ts == t0 + timedelta(hours=1)
+    assert len(store.events_since(t0)) == 2
+
+
+def test_db_file_mode_is_0600(tmp_path):
+    Store(tmp_path / "d" / "events.db").close()
+    mode = stat.S_IMODE((tmp_path / "d" / "events.db").stat().st_mode)
+    assert mode == 0o600
+
+
+def test_flagged_events_excludes_allowed(store):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    store.record(make_pe(t0, allowed=True, rule="ssh"))
+    store.record(make_pe(t0 + timedelta(seconds=1), path="/bad", allowed=False))
+    rows = store.flagged_events()
+    assert [r.path for r in rows] == ["/bad"]
+    assert rows[0].allowed is False
+    assert store.flagged_events(since=t0 + timedelta(hours=1)) == []
+
+
+def test_events_by_process_matches_comm_when_exe_missing(store):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    store.record(make_pe(t0, exe="/usr/bin/curl", comm="curl", path="/1"))
+    store.record(make_pe(t0, exe=None, comm="curl", path="/2"))
+    store.record(make_pe(t0, exe="/usr/bin/curl-x", comm="curl-x", path="/3"))
+    store.record(make_pe(t0, exe="/opt/100%_curl", comm="zz", path="/4"))
+    got = sorted(r.path for r in store.events_by_process("curl"))
+    assert got == ["/1", "/2"]
+    assert store.events_by_process("curl", since=t0 + timedelta(days=1)) == []
+    assert store.events_by_process("100%_curl")[0].path == "/4"
+    assert store.events_by_process("%") == []
+
+
+def test_snapshot_roundtrip(store):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    snap = NetworkSnapshot(
+        pid=100,
+        taken_at=t0 + timedelta(seconds=1),
+        alive=True,
+        connections=(Connection("AF_INET", "SOCK_STREAM", "1.2.3.4:5", "6.7.8.9:443", "ESTABLISHED"),
+                     Connection("AF_INET", "SOCK_DGRAM", "0.0.0.0:53", None, "NONE")),
+        ancestry=(ProcessInfo(100, "/usr/bin/cat", ("cat", "x")), ProcessInfo(1, None, ())),
+        error=None,
+    )
+    store.record(make_pe(t0, snapshot=snap))
+    store.record(make_pe(t0, path="/nosnap"))
+    rows = {r.path: r for r in store.events_since(t0)}
+    assert rows["/home/u/.ssh/id_rsa"].snapshot == snap
+    assert rows["/nosnap"].snapshot is None
+
+
+def test_daily_summary_uses_local_day_bounds(store):
+    tz = ZoneInfo("Africa/Lagos")  # UTC+1
+    # local Jan 2 00:30 == UTC Jan 1 23:30 (in day); local Jan 3 00:30 is out
+    store.record(make_pe(datetime(2026, 1, 1, 23, 30, tzinfo=UTC), path="/a"))
+    store.record(make_pe(datetime(2026, 1, 2, 22, 59, tzinfo=UTC), path="/a", allowed=True, exe="/bin/ls", comm="ls"))
+    store.record(make_pe(datetime(2026, 1, 2, 23, 30, tzinfo=UTC), path="/c"))
+    store.record(make_pe(datetime(2026, 1, 1, 22, 59, tzinfo=UTC), path="/z"))
+    s = store.compute_daily_summary(date(2026, 1, 2), tz)
+    assert s.day == date(2026, 1, 2)
+    assert s.total == 2
+    assert s.flagged == 1
+    assert s.by_process == (("cat", 1), ("ls", 1))
+    assert s.by_path == (("/a", 2),)
+
+
+def test_save_daily_summary_is_idempotent(store):
+    s = DailySummary(date(2026, 1, 2), 3, 1, (("cat", 3),), (("/a", 3),))
+    store.save_daily_summary(s)
+    store.save_daily_summary(s)
+    s2 = DailySummary(date(2026, 1, 2), 5, 2, (("cat", 5),), (("/a", 5),))
+    store.save_daily_summary(s2)
+    assert store.get_daily_summary(date(2026, 1, 2)) == s2
+    assert store.get_daily_summary(date(2026, 1, 3)) is None
+
+
+def test_meta_roundtrip(store):
+    assert store.get_meta("k") is None
+    store.set_meta("k", "v1")
+    store.set_meta("k", "v2")
+    assert store.get_meta("k") == "v2"
+
+
+def test_reopen_existing_db_keeps_data(tmp_path):
+    p = tmp_path / "e.db"
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    s1 = Store(p)
+    s1.record(make_pe(t0))
+    s1.set_meta("a", "b")
+    s1.close()
+    s2 = Store(p)
+    assert len(s2.events_since(t0)) == 1
+    assert s2.get_meta("a") == "b"
+    assert s2._conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert s2._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    s2.close()
