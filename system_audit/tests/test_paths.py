@@ -36,9 +36,24 @@ def cfg(home: Path, tmp_path: Path) -> Config:
 
 
 def test_default_list_is_spec_verbatim():
-    assert len(DEFAULT_SENSITIVE_PATHS) == 16
-    assert DEFAULT_SENSITIVE_PATHS[0] == "~/.aws/credentials"
-    assert DEFAULT_SENSITIVE_PATHS[-1] == "~/.config/doctl"
+    assert DEFAULT_SENSITIVE_PATHS == (
+        "~/.aws/credentials",
+        "~/.aws/config",
+        "~/.ssh",
+        "~/.config/gh/hosts.yml",
+        "~/.config/gcloud/credentials.db",
+        "~/.config/gcloud/legacy_credentials",
+        "~/.docker/config.json",
+        "~/.kube/config",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.netrc",
+        "~/.gnupg",
+        "~/.config/op",
+        "~/.terraform.d/credentials.tfrc.json",
+        "~/.azure/accessTokens.json",
+        "~/.config/doctl",
+    )
 
 
 def test_only_existing_defaults_returned(cfg, home):
@@ -130,3 +145,73 @@ def test_watch_list_roundtrip_is_0600(tmp_path):
     write_watch_list(paths, dest)
     assert read_watch_list(dest) == paths
     assert stat.S_IMODE(os.stat(dest).st_mode) == 0o600
+
+
+def test_symlink_loop_does_not_crash(cfg, home, caplog):
+    (home / ".npmrc").symlink_to(home / ".npmrc")
+    (home / ".netrc").write_text("x")
+    with caplog.at_level(logging.WARNING):
+        result = resolve_watch_paths(cfg)
+    assert home / ".npmrc" in result
+    assert home / ".netrc" in result
+
+
+def test_env_file_with_newline_skipped(home, caplog):
+    (home / ".env\n-D").write_text("x")
+    (home / ".env").write_text("x")
+    cfg = EnvScanConfig(roots=(home,), max_depth=2, excludes=())
+    with caplog.at_level(logging.WARNING):
+        found = scan_env_files(cfg)
+    assert found == (home / ".env",)
+    assert any("control" in r.getMessage() for r in caplog.records)
+
+
+def test_resolve_skips_control_char_extra_paths(cfg, home):
+    bad = home / "x\u2028y"
+    bad.write_text("x")
+    result = resolve_watch_paths(replace(cfg, extra_paths=(bad,)))
+    assert bad not in result
+
+
+@pytest.mark.parametrize("name", ["a\nb", "a\x00b", "a\x7fb", "a\x85b", "a\u2029b"])
+def test_write_watch_list_rejects_control_chars(tmp_path, name):
+    dest = tmp_path / "watch.list"
+    with pytest.raises(ValueError):
+        write_watch_list((Path("/ok"), Path("/bad/" + name)), dest)
+    assert not dest.exists()
+
+
+def test_symlink_to_root_not_watched(cfg, home):
+    (home / ".npmrc").symlink_to("/")
+    (home / ".netrc").write_text("x")
+    result = resolve_watch_paths(cfg)
+    assert Path("/") not in result
+    assert home / ".netrc" in result
+    assert home / ".npmrc" in result
+
+
+def test_symlink_into_home_dir_resolved(cfg, home):
+    (home / "dotfiles" / "config" / "gh").mkdir(parents=True)
+    (home / "dotfiles" / "config" / "gh" / "hosts.yml").write_text("x")
+    (home / ".config").symlink_to(home / "dotfiles" / "config")
+    result = resolve_watch_paths(cfg)
+    assert home / ".config" / "gh" / "hosts.yml" in result
+    assert home / "dotfiles" / "config" / "gh" / "hosts.yml" in result
+
+
+def test_home_or_ancestor_never_watched(cfg, home):
+    result = resolve_watch_paths(replace(cfg, extra_paths=(home, home.parent)))
+    assert home not in result
+    assert home.parent not in result
+
+
+def test_matcher_normalizes_dotdot(home):
+    m = WatchMatcher([home / "x" / ".." / ".aws"])
+    assert m.matches(str(home / ".aws" / "credentials"))
+    assert m.matches(str(home / "tmp" / ".." / ".aws" / "credentials"))
+    assert not m.matches(str(home / ".aws" / ".." / ".aws-old" / "x"))
+
+
+def test_matcher_case_insensitive(home):
+    assert not WatchMatcher([home / ".aws"]).matches(str(home / ".AWS" / "c"))
+    assert WatchMatcher([home / ".aws"], case_insensitive=True).matches(str(home / ".AWS" / "c"))
