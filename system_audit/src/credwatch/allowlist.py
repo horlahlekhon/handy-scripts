@@ -1,57 +1,68 @@
-"""Allowlist matching: (path pattern, process names) rules, unioned."""
+"""Allowlist matching: (path pattern, process names) rules, unioned.
+
+Process identity comes from the resolved exe only (comm and basenames of
+untrusted locations are spoofable), and fails closed when exe is unknown.
+"""
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
+from functools import lru_cache
 
 from credwatch.config import AllowRule
 from credwatch.models import FileAccessEvent, Verdict
 
-COMM_MAX_LEN = 15  # Linux truncates comm to 15 characters
 _RECURSIVE_SUFFIX = "/**"
+
+
+@lru_cache(maxsize=1024)
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """Translate a glob where '*' and '?' never cross '/'."""
+    out: list[str] = []
+    for ch in pattern:
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(ch))
+    return re.compile("".join(out) + r"\Z")
 
 
 def _path_matches(pattern: str, path: str) -> bool:
     if pattern.endswith(_RECURSIVE_SUFFIX):
         base = pattern[: -len(_RECURSIVE_SUFFIX)]
-        return path == base or path.startswith(base + "/")
-    return fnmatchcase(path, pattern)
+        return path == base or path.startswith(base.rstrip("/") + "/")
+    return _glob_regex(pattern).match(path) is not None
 
 
-def _candidate_names(event: FileAccessEvent) -> tuple[tuple[str, ...], str | None]:
-    """Return (exact names, truncated-comm fallback).
-
-    comm is spoofable (prctl PR_SET_NAME), so it is only trusted when exe is unknown.
-    """
-    if event.exe:
-        return (os.path.basename(event.exe),), None
-    if event.comm:
-        return (event.comm,), event.comm
-    return (), None
-
-
-def _process_matches(pattern: str, names: tuple[str, ...], comm: str | None) -> bool:
-    if any(fnmatchcase(name, pattern) for name in names):
-        return True
-    return (
-        comm is not None
-        and len(comm) >= COMM_MAX_LEN
-        and pattern.startswith(comm[:COMM_MAX_LEN])
-    )
+def _is_under(path: str, directory: str) -> bool:
+    base = os.path.normpath(directory)
+    return path.startswith(base.rstrip("/") + "/")
 
 
 @dataclass(frozen=True)
 class Allowlist:
     rules: tuple[AllowRule, ...]
+    trusted_dirs: tuple[str, ...] = ()
+
+    def _process_matches(self, pattern: str, exe: str) -> bool:
+        if pattern.startswith("/"):
+            return fnmatchcase(exe, pattern)
+        if not any(_is_under(exe, d) for d in self.trusted_dirs):
+            return False
+        return fnmatchcase(os.path.basename(exe), pattern)
 
     def check(self, event: FileAccessEvent) -> Verdict:
-        names, comm = _candidate_names(event)
-        if not names:
+        if not event.exe:
             return Verdict(False, None)
+        exe = os.path.normpath(event.exe)
+        path = os.path.normpath(event.path)
         for rule in self.rules:
-            if not _path_matches(rule.path_pattern, event.path):
+            if not _path_matches(rule.path_pattern, path):
                 continue
-            if any(_process_matches(p, names, comm) for p in rule.processes):
+            if any(self._process_matches(p, exe) for p in rule.processes):
                 return Verdict(True, rule.path_pattern)
         return Verdict(False, None)

@@ -136,3 +136,19 @@ def test_invalid_utf8_rejected(tmp_path, target):
     p.write_bytes(b"a: \xff\xfe\n")
     with pytest.raises(ConfigError, match="UTF-8"):
         load_config(p, "linux", target)
+
+
+@pytest.mark.parametrize("os_name", ["linux", "darwin"])
+def test_trusted_dirs_defaults_exclude_user_writable(tmp_path, target, home, os_name):
+    cfg = load_config(_write(tmp_path, {}), os_name, target)
+    dirs = {str(d) for d in cfg.allowlist_trusted_dirs}
+    assert "/usr/bin" in dirs
+    assert "/opt/homebrew" not in dirs
+    assert not any(d.startswith(str(home)) for d in dirs)
+
+
+def test_trusted_dirs_overridable_and_validated(tmp_path, target):
+    cfg = load_config(_write(tmp_path, {"allowlist_trusted_dirs": ["/x"]}), "linux", target)
+    assert cfg.allowlist_trusted_dirs == (Path("/x"),)
+    with pytest.raises(ConfigError, match="allowlist_trusted_dirs"):
+        load_config(_write(tmp_path, {"allowlist_trusted_dirs": "x"}), "linux", target)

@@ -69,10 +69,23 @@ class Config:
     extra_paths: tuple[Path, ...]
     env_scan: EnvScanConfig
     allowlist: tuple[AllowRule, ...]
+    allowlist_trusted_dirs: tuple[Path, ...]
     capture: CaptureConfig
     email: EmailConfig
     audit_export: ExportConfig
     os_name: str
+
+
+_TRUSTED_DIRS = {
+    "linux": [
+        "/usr/bin", "/usr/sbin", "/usr/libexec", "/usr/lib", "/bin", "/sbin",
+        "/usr/local/bin", "/opt", "/snap/bin",
+    ],
+    "darwin": [
+        "/usr/bin", "/usr/sbin", "/usr/libexec", "/bin", "/sbin", "/System",
+        "/Applications", "/usr/local/bin", "/opt/pipx",
+    ],
+}
 
 
 def default_config_dict(os_name: str) -> dict[str, Any]:
@@ -105,6 +118,7 @@ def default_config_dict(os_name: str) -> dict[str, Any]:
             },
             {"path_pattern": "~/.kube/**", "processes": ["kubectl", "helm", "k9s"]},
         ],
+        "allowlist_trusted_dirs": list(_TRUSTED_DIRS.get(os_name, _TRUSTED_DIRS["linux"])),
         "capture": {
             "enabled": True,
             "interface": "any" if os_name == "linux" else "pktap,all",
@@ -236,7 +250,7 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
     return loaded
 
 
-_TOP_KEYS = {"data_dir", "extra_paths", "env_scan", "allowlist", "capture", "email", "audit_export"}
+_TOP_KEYS = {"data_dir", "extra_paths", "env_scan", "allowlist", "allowlist_trusted_dirs", "capture", "email", "audit_export"}
 
 
 def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
@@ -300,6 +314,10 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
         extra_paths=tuple(Path(_expand(p, home)) for p in extra),
         env_scan=env_scan,
         allowlist=_build_allowlist(merged["allowlist"], home, data_dir),
+        allowlist_trusted_dirs=tuple(
+            Path(_expand(d, home))
+            for d in _str_list(merged["allowlist_trusted_dirs"], "allowlist_trusted_dirs")
+        ),
         capture=capture,
         email=email,
         audit_export=audit_export,
