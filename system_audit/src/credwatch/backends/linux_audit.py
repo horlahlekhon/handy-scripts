@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import posixpath
 import re
 from collections.abc import Mapping
@@ -72,6 +73,22 @@ def _to_int(value: str | None) -> int | None:
         return None
 
 
+def _parse_dev(value: str | None) -> int | None:
+    """Convert auditd's hex "MAJ:MIN" into a dev_t; None if missing or malformed."""
+    if not value:
+        return None
+    major, sep, minor = value.partition(":")
+    if not sep:
+        return None
+    try:
+        maj, mnr = int(major, 16), int(minor, 16)
+        if maj < 0 or mnr < 0:
+            return None
+        return os.makedev(maj, mnr)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
     syscall = next((r for r in group.records if r.type == "SYSCALL"), None)
     if syscall is None:
@@ -105,6 +122,8 @@ def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
                 success=syscall.fields.get("success") == "yes",
                 backend=BACKEND_NAME,
                 raw=raw,
+                inode=_to_int(rec.fields.get("inode")),
+                dev=_parse_dev(rec.fields.get("dev")),
             )
         )
     return events

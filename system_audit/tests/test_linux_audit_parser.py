@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import string
 import time
@@ -211,3 +212,25 @@ def test_empty_tick_flushes_stale_group():
     a = AuditAssembler(flush_after=2.0)
     run(a, ls, now=10.0)
     assert [e.path for e in a.feed("", 12.0)] == ["/home/u/.aws/credentials"]
+
+
+def test_path_inode_and_dev_parsed():
+    events = run(AuditAssembler(), lines("audit_enriched.log"))
+    assert events[0].inode == 131077
+    assert events[0].dev == os.makedev(0xFD, 0x01)
+    assert events[1].inode == 131099
+
+
+def _single_path_event(path_fields):
+    ls = [
+        'type=SYSCALL msg=audit(5.0:7): success=yes pid=1 ppid=2 key="credwatch"',
+        f'type=PATH msg=audit(5.0:7): item=0 name="/p" {path_fields}',
+        'type=EOE msg=audit(5.0:7): ',
+    ]
+    return run(AuditAssembler(), ls)[0]
+
+
+@pytest.mark.parametrize("fields", ["dev=zz:01", "dev=fd", "dev=:", "dev=fd:", "dev=-1:2", "", "dev=ffffffffffffffffffff:0"])
+def test_malformed_dev_is_none(fields):
+    assert _single_path_event(fields + " inode=abc").dev is None
+    assert _single_path_event(fields).inode is None

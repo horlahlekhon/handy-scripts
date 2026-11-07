@@ -16,6 +16,8 @@ class FileAccessEvent:
     success: bool | None
     backend: str
     raw: str
+    inode: int | None = None
+    dev: int | None = None
 
 
 @dataclass(frozen=True)
