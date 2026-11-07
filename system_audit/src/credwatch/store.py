@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_events_exe ON events(exe);
 CREATE TABLE IF NOT EXISTS net_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id INTEGER NOT NULL REFERENCES events(id),
+    pid INTEGER,
     taken_at TEXT NOT NULL,
     alive INTEGER NOT NULL,
     error TEXT,
@@ -56,9 +58,13 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 _EVENT_SELECT = """
 SELECT e.id, e.ts, e.path, e.pid, e.ppid, e.exe, e.comm, e.success, e.backend,
        e.allowed, e.matched_rule, e.raw,
-       s.taken_at, s.alive, s.error, s.connections_json, s.ancestry_json
+       s.taken_at, s.alive, s.error, s.connections_json, s.ancestry_json, s.pid
 FROM events e LEFT JOIN net_snapshots s ON s.event_id = e.id
 """
+
+
+class StoreError(Exception):
+    """Raised when the database location or schema is unsafe or unsupported."""
 
 
 @dataclass(frozen=True)
@@ -119,11 +125,40 @@ def _proc_to_dict(p: ProcessInfo) -> dict:
     return {"pid": p.pid, "exe": p.exe, "cmdline": list(p.cmdline)}
 
 
+def _prepare_dir(parent: Path) -> None:
+    """Create parent as a real 0700 directory owned by us; never follow symlinks."""
+    parent.mkdir(parents=True, exist_ok=True)
+    st = os.lstat(parent)
+    if not stat.S_ISDIR(st.st_mode):
+        raise StoreError(f"{parent} is not a real directory (symlink?)")
+    if st.st_uid != os.geteuid():
+        raise StoreError(f"{parent} is not owned by uid {os.geteuid()}")
+    os.chmod(parent, DB_DIR_MODE)
+    if stat.S_IMODE(os.lstat(parent).st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+        raise StoreError(f"{parent} is group/other writable")
+
+
+def _open_db_file(db_path: Path) -> None:
+    """Create/open the db file without following symlinks, forcing mode 0600."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(db_path, flags, DB_FILE_MODE)
+    except OSError as exc:
+        raise StoreError(f"cannot safely open {db_path}: {exc.strerror}") from exc
+    try:
+        os.fchmod(fd, DB_FILE_MODE)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            raise StoreError(f"{db_path} is not a regular file owned by uid {os.geteuid()}")
+    finally:
+        os.close(fd)
+
+
 def _row_to_event(r: tuple) -> EventRow:
     snapshot = None
     if r[12] is not None:
         snapshot = NetworkSnapshot(
-            pid=r[3],
+            pid=r[17],
             taken_at=_from_text(r[12]),
             alive=bool(r[13]),
             connections=tuple(Connection(**d) for d in json.loads(r[15])),
@@ -143,16 +178,26 @@ def _row_to_event(r: tuple) -> EventRow:
 class Store:
     def __init__(self, db_path: Path) -> None:
         db_path = Path(db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True, mode=DB_DIR_MODE)
-        # Create with 0600 before sqlite opens it (holds process cmdlines).
-        fd = os.open(db_path, os.O_RDWR | os.O_CREAT, DB_FILE_MODE)
-        os.close(fd)
-        os.chmod(db_path, DB_FILE_MODE)
+        _prepare_dir(db_path.parent)
+        _open_db_file(db_path)
         self._conn = sqlite3.connect(db_path)
+        try:
+            self._init_schema()
+        except Exception:
+            self._conn.close()
+            raise
+
+    def _init_schema(self) -> None:
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise StoreError(
+                f"database schema v{version} is newer than this credwatch supports"
+            )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
-        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        if version == 0:
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
 
     def close(self) -> None:
@@ -171,9 +216,9 @@ class Store:
             event_id = int(cur.lastrowid)
             if snap is not None:
                 self._conn.execute(
-                    "INSERT INTO net_snapshots (event_id, taken_at, alive, error,"
-                    " connections_json, ancestry_json) VALUES (?,?,?,?,?,?)",
-                    (event_id, _to_text(snap.taken_at), int(snap.alive), snap.error,
+                    "INSERT INTO net_snapshots (event_id, pid, taken_at, alive, error,"
+                    " connections_json, ancestry_json) VALUES (?,?,?,?,?,?,?)",
+                    (event_id, snap.pid, _to_text(snap.taken_at), int(snap.alive), snap.error,
                      json.dumps([_conn_to_dict(c) for c in snap.connections]),
                      json.dumps([_proc_to_dict(p) for p in snap.ancestry])),
                 )

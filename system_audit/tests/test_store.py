@@ -12,7 +12,7 @@ from credwatch.models import (
 )
 import pytest
 
-from credwatch.store import DailySummary, Store
+from credwatch.store import DailySummary, Store, StoreError
 
 UTC = timezone.utc
 
@@ -151,3 +151,72 @@ def test_reopen_existing_db_keeps_data(tmp_path):
     assert s2._conn.execute("PRAGMA user_version").fetchone()[0] == 1
     assert s2._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     s2.close()
+
+
+def test_symlinked_db_path_rejected(tmp_path):
+    target = tmp_path / "target"
+    target.write_bytes(b"untouched")
+    target.chmod(0o644)
+    link = tmp_path / "d" / "events.db"
+    link.parent.mkdir()
+    link.symlink_to(target)
+    with pytest.raises(StoreError):
+        Store(link)
+    assert target.read_bytes() == b"untouched"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_symlinked_parent_dir_rejected(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    real.chmod(0o755)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(StoreError):
+        Store(link / "events.db")
+    assert stat.S_IMODE(real.stat().st_mode) == 0o755
+    assert list(real.iterdir()) == []
+
+
+def test_existing_loose_db_tightened_to_0600(tmp_path):
+    p = tmp_path / "e.db"
+    Store(p).close()
+    p.chmod(0o666)
+    Store(p).close()
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_parent_dir_mode_0700(tmp_path):
+    d = tmp_path / "data"
+    d.mkdir(mode=0o755)
+    Store(d / "e.db").close()
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
+def test_snapshot_pid_roundtrips_independently_of_event_pid(tmp_path, store):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    with_pid = NetworkSnapshot(555, t0, True, (), (), None)
+    no_pid = NetworkSnapshot(None, t0, False, (), (), "gone")
+    store.record(make_pe(t0, path="/a", snapshot=with_pid))
+    store.record(make_pe(t0, path="/b", snapshot=no_pid))
+    rows = {r.path: r for r in store.events_since(t0)}
+    assert rows["/a"].pid == 100
+    assert rows["/a"].snapshot == with_pid
+    assert rows["/b"].snapshot == no_pid
+
+
+def test_newer_schema_version_rejected(tmp_path):
+    import sqlite3
+    p = tmp_path / "e.db"
+    c = sqlite3.connect(p)
+    c.execute("PRAGMA user_version = 2")
+    c.close()
+    with pytest.raises(StoreError, match="v2 is newer"):
+        Store(p)
+
+
+def test_naive_datetime_rejected(store):
+    with pytest.raises(ValueError):
+        store.record(make_pe(datetime(2026, 1, 1)))
+    with pytest.raises(ValueError):
+        store.events_since(datetime(2026, 1, 1))
