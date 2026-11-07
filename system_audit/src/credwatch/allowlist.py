@@ -59,6 +59,44 @@ def _wheel_gid() -> int | None:
         return None
 
 
+def _allowed_gids(allow_wheel: bool) -> frozenset[int]:
+    if allow_wheel:
+        wheel = _wheel_gid()
+        if wheel is not None:
+            return frozenset({0, wheel})
+    return frozenset({0})
+
+
+def _root_controlled_stat(st: Any, allowed_gids: frozenset[int]) -> bool:
+    """Owner/mode predicate shared by files and dirs.
+
+    uid 0, not other-writable; group-writable only for a gid in allowed_gids.
+    """
+    if st.st_uid != 0 or st.st_mode & stat_mod.S_IWOTH:
+        return False
+    return not (st.st_mode & stat_mod.S_IWGRP and st.st_gid not in allowed_gids)
+
+
+def _stat_is_root_controlled(
+    path: str, stat_fn: Callable[[str], Any], allowed_gids: frozenset[int]
+) -> bool:
+    try:
+        st = stat_fn(path)
+    except OSError:
+        logger.warning("cannot stat %s; treating as untrusted", path, exc_info=True)
+        return False
+    return _root_controlled_stat(st, allowed_gids)
+
+
+def is_root_controlled_file(
+    path: str,
+    stat_fn: Callable[[str], Any] = os.stat,
+    allow_wheel: bool = False,
+) -> bool:
+    """True if path itself is root-owned and not writable by others (fails closed)."""
+    return _stat_is_root_controlled(os.path.normpath(path), stat_fn, _allowed_gids(allow_wheel))
+
+
 def is_root_controlled_dir(
     path: str,
     stat_fn: Callable[[str], Any] = os.stat,
@@ -68,21 +106,10 @@ def is_root_controlled_dir(
 
     Group-writable is tolerated only for gid 0 (or group "wheel" if allow_wheel).
     """
-    allowed_gids = {0}
-    if allow_wheel:
-        wheel = _wheel_gid()
-        if wheel is not None:
-            allowed_gids.add(wheel)
+    allowed_gids = _allowed_gids(allow_wheel)
     current = os.path.normpath(path)
     while True:
-        try:
-            st = stat_fn(current)
-        except OSError:
-            logger.warning("cannot stat %s; treating as untrusted", current, exc_info=True)
-            return False
-        if st.st_uid != 0 or st.st_mode & stat_mod.S_IWOTH:
-            return False
-        if st.st_mode & stat_mod.S_IWGRP and st.st_gid not in allowed_gids:
+        if not _stat_is_root_controlled(current, stat_fn, allowed_gids):
             return False
         parent = os.path.dirname(current)
         if parent == current:
@@ -104,6 +131,7 @@ class Allowlist:
     stat_fn: Callable[[str], Any] = os.stat
     os_name: str = "linux"
     _dir_cache: dict[str, bool] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _exe_cache: dict[str, bool] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -129,10 +157,24 @@ class Allowlist:
                 logger.debug("exe dir %s is not root-controlled; basename match refused", directory)
         return cached
 
+    def _trusted_exe_file(self, exe: str) -> bool:
+        cached = self._exe_cache.get(exe)
+        if cached is None:
+            cached = is_root_controlled_file(
+                exe, self.stat_fn, allow_wheel=self.os_name == "darwin"
+            )
+            self._exe_cache[exe] = cached
+            if not cached:
+                logger.debug("exe %s is not root-controlled; basename match refused", exe)
+        return cached
+
+    def _trusted_exe(self, exe: str) -> bool:
+        return self._trusted_exe_dir(exe) and self._trusted_exe_file(exe)
+
     def _process_matches(self, pattern: str, exe: str) -> bool:
         if pattern.startswith("/"):
             return fnmatchcase(exe, pattern)
-        if not self._trusted_exe_dir(exe):
+        if not self._trusted_exe(exe):
             return False
         return fnmatchcase(os.path.basename(exe), pattern)
 

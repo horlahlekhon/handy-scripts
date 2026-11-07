@@ -176,7 +176,52 @@ def test_stat_failure_flagged():
 def test_root_owned_chain_allows_basename():
     st = fake_stat()
     assert _ssh_check(st).allowed
-    assert st.calls == ["/usr/bin", "/usr", "/"]
+    assert st.calls == ["/usr/bin", "/usr", "/", "/usr/bin/ssh"]
+
+
+def test_user_owned_exe_in_trusted_dir_flagged():
+    st = fake_stat({"/usr/bin/ssh": St(1000, 1000, 0o100755)})
+    assert not _ssh_check(st).allowed
+
+
+def test_group_writable_exe_flagged():
+    st = fake_stat({"/usr/bin/ssh": St(0, 1000, 0o100775)})
+    assert not _ssh_check(st).allowed
+
+
+def test_group_writable_root_group_exe_allowed():
+    st = fake_stat({"/usr/bin/ssh": St(0, 0, 0o100775)})
+    assert _ssh_check(st).allowed
+
+
+def test_other_writable_exe_flagged():
+    st = fake_stat({"/usr/bin/ssh": St(0, 0, 0o100757)})
+    assert not _ssh_check(st).allowed
+
+
+def test_group_writable_wheel_exe_allowed_on_darwin(monkeypatch):
+    import grp
+    monkeypatch.setattr(grp, "getgrnam", lambda n: type("G", (), {"gr_gid": 80})())
+    st = fake_stat({"/usr/bin/ssh": St(0, 80, 0o100775)})
+    assert _ssh_check(st, os_name="darwin").allowed
+    assert not _ssh_check(st, os_name="linux").allowed
+
+
+def test_exe_stat_failure_flagged():
+    def stat(p):
+        if p == "/usr/bin/ssh":
+            raise PermissionError(p)
+        return ROOT_OK
+
+    assert not _ssh_check(stat).allowed
+
+
+def test_exe_check_cached():
+    st = fake_stat()
+    al = Allowlist((SSH_RULE,), TRUSTED, st)
+    ev = make_event(f"{HOME}/.ssh/id_rsa", exe="/usr/bin/ssh")
+    assert al.check(ev).allowed and al.check(ev).allowed
+    assert st.calls.count("/usr/bin/ssh") == 1
 
 
 def test_dir_check_cached():
