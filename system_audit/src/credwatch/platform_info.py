@@ -53,7 +53,8 @@ def resolve_target_user(explicit: str | None, environ: Mapping[str, str]) -> Tar
     )
 
 
-def default_data_dir(home: Path, os_name: str) -> Path:
+def default_data_dir(os_name: str) -> Path:
+    """Root-owned data dir (never under the target user's home)."""
     if os_name == "darwin":
-        return home / "Library" / "Application Support" / "credwatch"
-    return home / ".local" / "share" / "credwatch"
+        return Path("/Library/Application Support/credwatch")
+    return Path("/var/lib/credwatch")

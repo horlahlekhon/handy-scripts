@@ -126,6 +126,13 @@ def _proc_to_dict(p: ProcessInfo) -> dict:
     return {"pid": p.pid, "exe": p.exe, "cmdline": list(p.cmdline)}
 
 
+def _check_file(st: os.stat_result, path: Path) -> None:
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        raise StoreError(
+            f"{path} must be a regular, euid-owned file with a single link"
+        )
+
+
 def _open_db_file(dir_fd: int, db_path: Path) -> os.stat_result:
     """Create/open the db file relative to dir_fd without following symlinks."""
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -134,15 +141,46 @@ def _open_db_file(dir_fd: int, db_path: Path) -> os.stat_result:
     except OSError as exc:
         raise StoreError(f"cannot safely open {db_path}: {exc.strerror}") from exc
     try:
-        os.fchmod(fd, DB_FILE_MODE)
         st = os.fstat(fd)
+        _check_file(st, db_path)  # validate before touching permissions
+        os.fchmod(fd, DB_FILE_MODE)
+        return os.fstat(fd)
+    except OSError as exc:
+        raise StoreError(f"cannot secure {db_path}: {exc.strerror}") from exc
     finally:
         os.close(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
-        raise StoreError(
-            f"{db_path} must be a regular, euid-owned file with a single link"
-        )
-    return st
+
+
+def _verify_same_file(path: Path, st: os.stat_result) -> None:
+    """Path must still be the (non-symlink) file we opened by fd."""
+    now = os.lstat(path)
+    if stat.S_ISLNK(now.st_mode) or (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+        raise StoreError(f"{path} changed while opening")
+
+
+def _verify_sidecars(db_path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        side = db_path.with_name(db_path.name + suffix)
+        try:
+            now = os.lstat(side)
+        except FileNotFoundError:
+            continue
+        _check_file(now, side)
+
+
+def _find_open_fd_stat(path: Path) -> os.stat_result | None:
+    """fstat of an fd of this process whose /proc link is exactly path (Linux)."""
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        return None
+    target = str(path)
+    for name in os.listdir(fd_dir):
+        try:
+            if os.readlink(fd_dir / name) == target:
+                return os.fstat(int(name))
+        except OSError:
+            continue
+    return None
 
 
 def _row_to_event(r: tuple) -> EventRow:
@@ -171,32 +209,26 @@ class Store:
         db_path = Path(db_path)
         try:
             self._dir_fd = open_dir_chain(db_path.parent, create_mode=DB_DIR_MODE)
-        except UnsafePathError as exc:
+        except (UnsafePathError, ValueError, OSError) as exc:
             raise StoreError(str(exc)) from exc
+        self._conn: sqlite3.Connection | None = None
         try:
             st = _open_db_file(self._dir_fd, db_path)
-            self._conn = self._connect(db_path, st)
-        except BaseException:
-            os.close(self._dir_fd)
-            raise
-        try:
+            self._conn = sqlite3.connect(db_path)
+            _verify_same_file(db_path, st)
             self._init_schema()
+            _verify_sidecars(db_path)
+            self._verify_open_fd(db_path, st)
         except BaseException:
             self.close()
             raise
 
-    def _connect(self, db_path: Path, st: os.stat_result) -> sqlite3.Connection:
-        if os.path.isdir("/proc/self/fd"):
-            return sqlite3.connect(f"/proc/self/fd/{self._dir_fd}/{db_path.name}")
-        conn = sqlite3.connect(db_path)
-        try:
-            now = os.lstat(db_path)
-            if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
-                raise StoreError(f"{db_path} changed while opening")
-        except BaseException:
-            conn.close()
-            raise
-        return conn
+    def _verify_open_fd(self, db_path: Path, st: os.stat_result) -> None:
+        found = _find_open_fd_stat(db_path)
+        if found is None:
+            logger.warning("could not find sqlite's open fd for %s to verify", db_path)
+        elif (found.st_dev, found.st_ino) != (st.st_dev, st.st_ino):
+            raise StoreError(f"sqlite opened a different file than verified: {db_path}")
 
     def _init_schema(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -212,8 +244,13 @@ class Store:
         self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
-        os.close(self._dir_fd)
+        try:
+            if self._conn is not None:
+                self._conn.close()
+        finally:
+            if self._dir_fd >= 0:
+                os.close(self._dir_fd)
+                self._dir_fd = -1
 
     def record(self, pe: ProcessedEvent) -> int:
         ev, snap = pe.event, pe.snapshot

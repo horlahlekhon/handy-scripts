@@ -65,3 +65,28 @@ def test_fds_closed_on_error(tmp_path):
         with pytest.raises(UnsafePathError):
             open_dir_chain(tmp_path / "link" / "x")
     assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_dotdot_rejected_before_normalisation(tmp_path):
+    with pytest.raises(ValueError):
+        open_dir_chain(tmp_path / "a" / ".." / "b")
+
+
+def test_user_writable_ancestor_rejected(tmp_path):
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o777)
+    child = loose / "child"
+    child.mkdir()
+    with pytest.raises(UnsafePathError, match="loose"):
+        open_dir_chain(child)
+
+
+def test_sticky_root_ancestor_allowed():
+    st = os.stat("/tmp")
+    if not (st.st_uid == 0 and st.st_mode & stat.S_ISVTX):
+        pytest.skip("/tmp is not root-owned sticky")
+    import tempfile
+    with tempfile.TemporaryDirectory(dir="/tmp") as d:
+        from pathlib import Path
+        os.close(open_dir_chain(Path(d) / "sub"))

@@ -243,3 +243,63 @@ def test_naive_datetime_rejected(store):
         store.record(make_pe(datetime(2026, 1, 1)))
     with pytest.raises(ValueError):
         store.events_since(datetime(2026, 1, 1))
+
+
+def test_inode_mismatch_after_connect_rejected(tmp_path, monkeypatch):
+    import os
+    p = tmp_path / "e.db"
+    real_lstat = os.lstat
+
+    def fake(path, *a, **k):
+        st = real_lstat(path, *a, **k)
+        if str(path) == str(p):
+            vals = list(st)[:10]
+            vals[1] += 1
+            return os.stat_result(vals)
+        return st
+
+    monkeypatch.setattr(os, "lstat", fake)
+    with pytest.raises(StoreError, match="changed"):
+        Store(p)
+
+
+def test_open_fd_inode_mismatch_rejected(tmp_path, monkeypatch):
+    import os
+    import credwatch.store as store_mod
+
+    def fake_find(path):
+        st = os.stat(path)
+        vals = list(st)[:10]
+        vals[1] += 1
+        return os.stat_result(vals)
+
+    monkeypatch.setattr(store_mod, "_find_open_fd_stat", fake_find)
+    with pytest.raises(StoreError, match="different file"):
+        Store(tmp_path / "e.db")
+
+
+def test_open_fd_not_found_only_warns(tmp_path, monkeypatch, caplog):
+    import credwatch.store as store_mod
+
+    monkeypatch.setattr(store_mod, "_find_open_fd_stat", lambda path: None)
+    with caplog.at_level("WARNING"):
+        Store(tmp_path / "e.db").close()
+    assert "could not find" in caplog.text
+
+
+def test_hardlinked_db_not_chmodded(tmp_path):
+    import os
+    p = tmp_path / "e.db"
+    Store(p).close()
+    other = tmp_path / "other"
+    os.link(p, other)
+    p.chmod(0o640)
+    with pytest.raises(StoreError):
+        Store(p)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o640
+
+
+def test_relative_db_path_rejected():
+    from pathlib import Path
+    with pytest.raises(StoreError):
+        Store(Path("rel/e.db"))

@@ -91,7 +91,7 @@ _TRUSTED_DIRS = {
 def default_config_dict(os_name: str) -> dict[str, Any]:
     """Defaults as plain data; paths keep a leading '~' to be expanded at load time."""
     return {
-        "data_dir": str(default_data_dir(Path("~"), os_name)),
+        "data_dir": str(default_data_dir(os_name)),
         "extra_paths": [],
         "env_scan": {
             "roots": ["~"],

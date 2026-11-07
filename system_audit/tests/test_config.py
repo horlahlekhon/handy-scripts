@@ -27,11 +27,11 @@ def _write(tmp_path, data) -> Path:
 
 @pytest.mark.parametrize(
     "os_name,suffix",
-    [("linux", ".local/share/credwatch"), ("darwin", "Library/Application Support/credwatch")],
+    [("linux", "/var/lib/credwatch"), ("darwin", "/Library/Application Support/credwatch")],
 )
-def test_defaults_expand_tilde_against_target_home(tmp_path, target, home, os_name, suffix):
+def test_defaults_use_root_owned_data_dir_and_expand_home(tmp_path, target, home, os_name, suffix):
     cfg = load_config(_write(tmp_path, {}), os_name, target)
-    assert cfg.data_dir == home / suffix
+    assert cfg.data_dir == Path(suffix)
     assert cfg.home == home
     assert cfg.target_user == "alice"
     assert cfg.env_scan.roots == (home,)
@@ -48,11 +48,11 @@ def test_missing_file_uses_defaults(tmp_path, target):
 
 @pytest.mark.parametrize(
     "os_name,suffix",
-    [("linux", ".local/share/credwatch"), ("darwin", "Library/Application Support/credwatch")],
+    [("linux", "/var/lib/credwatch"), ("darwin", "/Library/Application Support/credwatch")],
 )
 def test_canary_rule_always_appended(tmp_path, target, home, os_name, suffix):
     cfg = load_config(_write(tmp_path, {"allowlist": []}), os_name, target)
-    assert cfg.allowlist[-1] == AllowRule(str(home / suffix / "canary"), ("credwatch",))
+    assert cfg.allowlist[-1] == AllowRule(str(Path(suffix) / "canary"), ("credwatch",))
     assert cfg.allowlist[-1].processes == ("credwatch",)
 
 

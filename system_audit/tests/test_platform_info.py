@@ -45,12 +45,9 @@ def test_resolve_target_user_unknown_raises():
         resolve_target_user("no-such-user-xyz", {})
 
 
-def test_default_data_dir_per_os(tmp_path):
-    assert default_data_dir(tmp_path, "linux") == tmp_path / ".local/share/credwatch"
-    assert (
-        default_data_dir(tmp_path, "darwin")
-        == tmp_path / "Library/Application Support/credwatch"
-    )
+def test_default_data_dir_per_os():
+    assert default_data_dir("linux") == Path("/var/lib/credwatch")
+    assert default_data_dir("darwin") == Path("/Library/Application Support/credwatch")
 
 
 @pytest.mark.parametrize(
