@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credwatch"
+version = "0.1.0"
+description = "Root-run credential-file access monitor with network correlation and email alerts"
+requires-python = ">=3.11"
+dependencies = ["psutil>=6.0", "PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.scripts]
+credwatch = "credwatch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+credwatch = ["templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
