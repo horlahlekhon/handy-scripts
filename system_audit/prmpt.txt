@@ -1,0 +1,166 @@
+I need you to build a cross-platform credential/secret-access monitoring tool
+called "credwatch" for my personal dev workspace repo. Context: I had a
+confirmed credential-theft incident — two separate AWS accounts and a GitHub
+PAT were compromised, all traced back to my personal Debian machine, almost
+certainly via some kind of local infostealer malware that I have not yet
+identified. Before I wipe and reinstall that machine, I want permanent,
+cross-platform tooling that watches sensitive credential files, correlates
+any unexpected access with the process and network activity responsible,
+alerts me by email, and keeps a historical log I can manually dig through
+later. I want this running persistently on both of my machines going forward,
+not just during this investigation.
+
+TARGET MACHINES
+- Personal: Debian Linux desktop (GNOME), systemd-based, has auditd available.
+- Work: macOS laptop, launchd-based, no auditd — use `fs_usage` (built-in,
+  requires root/sudo) as the file-access monitoring backend instead, since
+  macOS has no simple path-based read-watching equivalent to Linux auditd.
+  Be upfront in the README about the real limitation here: fs_usage requires
+  elevated privileges and may need Full Disk Access / Terminal permissions
+  granted in System Settings on modern macOS, and Apple's sandboxing could
+  tighten further in future releases — don't overstate reliability on macOS
+  relative to Linux.
+
+ARCHITECTURE
+Build this as an installable Python package (NOT a single compiled binary —
+I want it in Python, matching my stack, running under systemd on Linux and
+launchd on macOS for process supervision/auto-restart/boot-start, rather than
+relying on compiled-binary portability I don't need for two machines I
+control). Structure it as focused, independently-testable modules, not one
+monolithic script:
+
+1. `paths` — produces the list of sensitive files/directories to watch, per
+   OS. Include as defaults: ~/.aws/credentials, ~/.aws/config, ~/.ssh (and
+   everything in it), ~/.config/gh/hosts.yml, ~/.config/gcloud/credentials.db
+   and legacy_credentials, ~/.docker/config.json, ~/.kube/config, ~/.npmrc,
+   ~/.pypirc, ~/.netrc, ~/.gnupg, ~/.config/op (1Password CLI),
+   ~/.terraform.d/credentials.tfrc.json, ~/.azure/accessTokens.json,
+   ~/.config/doctl, plus a dynamic recursive scan for `.env*` files under the
+   home directory (excluding node_modules, .git, venv, .venv, capped at a
+   configurable max depth). Only watch paths that actually exist. Make this
+   list configurable/extendable via the YAML config, and re-runnable on
+   demand (new .env files created after install won't be picked up
+   automatically — re-running the install/path-scan command should refresh
+   coverage).
+
+2. `backends` — an abstract base defining a stream of file-access events
+   (timestamp, path, pid, process exe, ppid, success/fail), with two
+   concrete implementations:
+   - Linux: installs persistent auditd watch rules (`-w <path> -p rwa -k
+     credwatch`) into /etc/audit/rules.d/, loads them with `augenrules
+     --load`, ensures the auditd service is enabled, and then tails
+     /var/log/audit/audit.log in real time, parsing the multi-line SYSCALL/
+     PATH/CWD record groups for our key, extracting exe=, pid=, ppid=,
+     success=, and the accessed path.
+   - macOS: runs `fs_usage -w -f filesys` as a subprocess, parses its
+     streaming output for opens/reads touching any watched path, extracting
+     process name and pid from each matching line.
+
+3. `correlate` — the moment a file-access event comes in, check it against
+   an allowlist (see below); if it's NOT an allowed process for that path,
+   immediately snapshot that pid's live network connections via `psutil`
+   (local/remote addresses, ports, status) before the process potentially
+   exits. Handle the process having already exited gracefully (don't crash).
+
+4. `capture` — maintains a continuously-running, auto-rotating `tcpdump -i
+   any` capture (this works cross-platform, both Debian and macOS ship
+   tcpdump) using time-based rotation and a capped number of retained files,
+   so it never fills the disk over days/weeks of uptime. Store these in a
+   clearly separate, well-labeled directory (see data layout below) so I can
+   manually pull up "what was happening on the network around this
+   timestamp" days later even if the live alerting missed something.
+
+5. `store` — a SQLite database recording every file-access event (allowed
+   and flagged), every correlated network snapshot, and daily summary
+   rollups. Add simple query functions for "events in the last N days",
+   "events involving process X", "all flagged/unallowed events".
+
+6. `allowlist` — YAML-configurable mapping of path patterns to expected
+   process basenames (e.g. ~/.ssh/** -> ssh, git, seahorse, nautilus,
+   gnome-keyring-daemon, scp, sftp, rsync; ~/.aws/** -> aws, python3,
+   terraform, boto3-using interpreters; ~/.config/gh/** -> gh, git). Anything
+   not matching is "flagged" and triggers correlation + immediate alert.
+
+7. `alert` — email notifications via Gmail SMTP using an app password (NOT
+   my real Gmail password). Read the Gmail address and app password from
+   environment variables only (e.g. CREDWATCH_SMTP_USER,
+   CREDWATCH_SMTP_PASSWORD) sourced from a local secrets file that is
+   explicitly listed in .gitignore and NEVER committed — this project's own
+   secrets must not become another leak vector on a machine that's already
+   been compromised once. Send an immediate email the moment a flagged
+   (non-allowlisted) access happens, and a daily digest summarizing all
+   activity (flagged and routine) at a configurable local hour.
+
+8. `cli` — a command-line entry point (`credwatch`) with subcommands:
+   `install` (idempotent — sets up the OS-appropriate backend, directories,
+   and service files), `run` (foreground daemon loop, for debugging),
+   `status` (show whether the service/backend is active and recent event
+   counts), `report --last <duration>` (query and print/export history from
+   the SQLite store), and `test-email` (send a one-off test email to verify
+   SMTP config before relying on it).
+
+DATA LAYOUT
+Under a single base data directory (e.g. ~/.local/share/credwatch on Linux,
+~/Library/Application Support/credwatch on macOS), create clearly separated
+subfolders so everything is available for manual troubleshooting later, not
+just automated alerting:
+  - captures/       (rotated tcpdump pcap files)
+  - audit-exports/  (periodic raw dumps of backend-native logs — e.g. a
+                      saved `ausearch -k credwatch -i` export on Linux, or
+                      captured fs_usage output on macOS — timestamped, kept
+                      for a configurable retention window)
+  - logs/           (the daemon's own operational logs — startup, errors,
+                      config reloads — via Python logging, rotated)
+  - events.db       (the SQLite store)
+Document this layout clearly in the README so I can navigate it by hand
+during an investigation.
+
+CONFIG
+A single YAML config file with sensible OS-aware defaults, covering: data
+directory location, extra watched paths, .env scan roots/depth/excludes,
+the allowlist mapping, capture rotation settings (interval, retained file
+count, enabled/disabled), and email settings (SMTP host/port, from/to
+addresses, digest hour, whether to send immediately on flagged events) —
+everything except the actual SMTP credentials, which come only from the
+environment/secrets file as described above.
+
+PACKAGING & INSTALL
+- A proper `pyproject.toml` installable package (deps: psutil, PyYAML;
+  avoid adding more than necessary — favor stdlib where reasonable for
+  robustness). Installable via pipx so it runs in its own isolated venv on
+  either machine.
+- A systemd user (or system, your judgment — explain the tradeoff in the
+  README) service unit for Linux with Restart=on-failure and
+  EnvironmentFile pointing at the local, gitignored secrets file.
+- A launchd .plist for macOS with KeepAlive and an equivalent way to source
+  the same secrets file.
+- A top-level README covering: what this does and why, how to generate a
+  Gmail app password, how to configure config.yaml and the secrets file on
+  each OS, how to run `credwatch install`, how to verify it's working
+  (`credwatch status`, `credwatch test-email`), and the known macOS
+  limitation around fs_usage permissions.
+- Include a .gitignore that excludes the secrets file, the SQLite db,
+  captures/, logs/, and audit-exports/ by default, since none of that
+  belongs in version control.
+- Include an example config.yaml and an example secrets file template
+  (with placeholder values, clearly not real).
+
+NON-GOALS / THINGS TO GET RIGHT
+- Don't let this tool itself become a new attack surface: no credentials
+  in the repo, ever, and call this out explicitly in the README as the
+  reason for the secrets-file separation.
+- Handle the "process already exited before I could inspect it" race
+  gracefully everywhere (psutil.NoSuchProcess, etc.) rather than crashing
+  the daemon.
+- Make the install step idempotent — running it repeatedly (e.g. after
+  adding new .env files to the watch list) should not duplicate rules or
+  break existing state.
+- Favor clear logging over silent failure everywhere, since the entire
+  point of this tool is to be trustworthy evidence during an
+  investigation — if something isn't working, I need to know immediately,
+  not discover it in hindsight.
+
+Please scaffold the full project now with working code, not just
+placeholders, starting with the Linux backend end-to-end (since that's my
+primary machine right now), then the macOS backend, then wire in the
+daemon loop, CLI, and service files.
