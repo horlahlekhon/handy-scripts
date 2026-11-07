@@ -1,0 +1,5 @@
+# HAND-WRITTEN fixture: hex-encoded name (/home/u/my env/.env). Replaced by captured lines in Task 14.
+type=SYSCALL msg=audit(1731000100.001:9001): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=7ffd1c2e3a40 a2=0 a3=0 items=1 ppid=1234 pid=6001 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="cat" exe="/usr/bin/cat" subj=unconfined key="credwatch"ARCH=x86_64 SYSCALL=openat AUID="u" UID="u" GID="u" EUID="u" SUID="u" FSUID="u" EGID="u" SGID="u" FSGID="u"
+type=CWD msg=audit(1731000100.001:9001): cwd="/home/u"
+type=PATH msg=audit(1731000100.001:9001): item=0 name=2F686F6D652F752F6D7920656E762F2E656E76 inode=1 dev=fd:01 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0OUID="u" OGID="u"
+type=EOE msg=audit(1731000100.001:9001): 

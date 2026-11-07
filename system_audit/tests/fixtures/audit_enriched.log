@@ -1,0 +1,23 @@
+# HAND-WRITTEN fixture in Debian auditd log_format=ENRICHED shape (0x1d separators).
+# Will be replaced with captured lines in Task 14. Comment lines are garbage the parser must ignore.
+type=SYSCALL msg=audit(1731000000.123:4567): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=7ffd1c2e3a40 a2=0 a3=0 items=1 ppid=1234 pid=5678 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="cat" exe="/usr/bin/cat" subj=unconfined key="credwatch"ARCH=x86_64 SYSCALL=openat AUID="u" UID="u" GID="u" EUID="u" SUID="u" FSUID="u" EGID="u" SGID="u" FSGID="u"
+type=CWD msg=audit(1731000000.123:4567): cwd="/home/u"
+type=PATH msg=audit(1731000000.123:4567): item=0 name="/home/u/.aws/credentials" inode=131077 dev=fd:01 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0OUID="u" OGID="u"
+type=PROCTITLE msg=audit(1731000000.123:4567): proctitle=636174002F686F6D652F752F2E6177732F63726564656E7469616C73
+type=EOE msg=audit(1731000000.123:4567): 
+type=SYSCALL msg=audit(1731000001.456:4568): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=7ffd1c2e3a40 a2=0 a3=0 items=1 ppid=1234 pid=5700 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="touch" exe="/usr/bin/touch" subj=unconfined key="credwatch"ARCH=x86_64 SYSCALL=openat AUID="u" UID="u" GID="u" EUID="u" SUID="u" FSUID="u" EGID="u" SGID="u" FSGID="u"
+type=CWD msg=audit(1731000001.456:4568): cwd="/home/u/.ssh"
+type=PATH msg=audit(1731000001.456:4568): item=0 name="/home/u/.ssh" inode=131080 dev=fd:01 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0OUID="u" OGID="u"
+type=PATH msg=audit(1731000001.456:4568): item=1 name="id_new" inode=131099 dev=fd:01 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=CREATE cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0OUID="u" OGID="u"
+type=PROCTITLE msg=audit(1731000001.456:4568): proctitle=746F7563680069645F6E6577
+type=EOE msg=audit(1731000001.456:4568): 
+type=SYSCALL msg=audit(1731000002.789:4569): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=7ffd1c2e3a40 a2=0 a3=0 items=1 ppid=1234 pid=5710 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="vim" exe="/usr/bin/vim.basic" subj=unconfined key="other-key"ARCH=x86_64 SYSCALL=openat AUID="u" UID="u" GID="u" EUID="u" SUID="u" FSUID="u" EGID="u" SGID="u" FSGID="u"
+type=CWD msg=audit(1731000002.789:4569): cwd="/home/u"
+type=PATH msg=audit(1731000002.789:4569): item=0 name="/etc/hosts" inode=262200 dev=fd:01 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0OUID="u" OGID="u"
+type=PROCTITLE msg=audit(1731000002.789:4569): proctitle=76696D002F6574632F686F737473
+type=EOE msg=audit(1731000002.789:4569): 
+type=SYSCALL msg=audit(1731000003.012:4570): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=7ffd1c2e3a40 a2=0 a3=0 items=1 ppid=1234 pid=5720 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="ls" exe="/usr/bin/ls" subj=unconfined key=(null)ARCH=x86_64 SYSCALL=openat AUID="u" UID="u" GID="u" EUID="u" SUID="u" FSUID="u" EGID="u" SGID="u" FSGID="u"
+type=CWD msg=audit(1731000003.012:4570): cwd="/home/u"
+type=PATH msg=audit(1731000003.012:4570): item=0 name="/home/u" inode=131073 dev=fd:01 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0OUID="u" OGID="u"
+type=PROCTITLE msg=audit(1731000003.012:4570): proctitle=6C73
+type=EOE msg=audit(1731000003.012:4570): 
