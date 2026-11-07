@@ -79,11 +79,11 @@ class Config:
 _TRUSTED_DIRS = {
     "linux": [
         "/usr/bin", "/usr/sbin", "/usr/libexec", "/usr/lib", "/bin", "/sbin",
-        "/usr/local/bin", "/opt", "/snap/bin",
+        "/usr/local/bin", "/opt/pipx", "/snap/bin",
     ],
     "darwin": [
         "/usr/bin", "/usr/sbin", "/usr/libexec", "/bin", "/sbin", "/System",
-        "/Applications", "/usr/local/bin", "/opt/pipx",
+        "/opt/pipx",
     ],
 }
 

@@ -144,6 +144,12 @@ def test_trusted_dirs_defaults_exclude_user_writable(tmp_path, target, home, os_
     dirs = {str(d) for d in cfg.allowlist_trusted_dirs}
     assert "/usr/bin" in dirs
     assert "/opt/homebrew" not in dirs
+    assert "/opt" not in dirs
+    assert "/opt/pipx" in dirs
+    if os_name == "darwin":
+        assert not dirs & {"/Applications", "/usr/local/bin"}
+    else:
+        assert "/usr/local/bin" in dirs
     assert not any(d.startswith(str(home)) for d in dirs)
 
 
