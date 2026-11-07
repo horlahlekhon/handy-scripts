@@ -1,5 +1,11 @@
+import logging
+import random
+import string
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from credwatch.backends.linux_audit import AuditAssembler, parse_record
 
@@ -144,3 +150,64 @@ def test_garbage_line_returns_none_and_does_not_raise():
     for junk in ["", "garbage", "type=SYSCALL", "type=X msg=audit(abc:1): a=b", "\x1d\x1d", "# comment"]:
         assert parse_record(junk) is None
     assert AuditAssembler().feed("garbage", 0.0) == []
+
+
+@pytest.mark.parametrize("epoch", ["9" * 20, "9" * 400, "99999999999999"])
+def test_huge_epoch_does_not_raise(epoch):
+    line = f"type=SYSCALL msg=audit({epoch}:1): success=yes key=\"credwatch\""
+    assert parse_record(line) is None
+    assert AuditAssembler().feed(line, 0.0) == []
+
+
+def test_feed_never_raises_on_fuzzed_lines():
+    rng = random.Random(1234)
+    alphabet = string.printable + "\x1d\x00\x01\x7f"
+    a = AuditAssembler()
+    for i in range(400):
+        junk = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 80)))
+        prefix = rng.choice(["", "type=PATH msg=audit(1.5:%d): " % (i % 7), "type=EOE msg=audit(%d:3): " % rng.randint(0, 10**9)])
+        a.feed(prefix + junk, float(i))
+
+
+def test_build_failure_drops_group_with_warning(caplog, monkeypatch):
+    import credwatch.backends.linux_audit as mod
+
+    def boom(group, key):
+        raise OverflowError("x")
+
+    monkeypatch.setattr(mod, "_build_events", boom)
+    with caplog.at_level(logging.WARNING):
+        assert run(AuditAssembler(), lines("audit_enriched.log")) == []
+    assert "serial=4567" in caplog.text
+
+
+def test_null_path_name_logged_at_debug(caplog):
+    ls = [
+        'type=SYSCALL msg=audit(5.0:7): success=yes pid=1 ppid=2 key="credwatch"',
+        'type=PATH msg=audit(5.0:7): item=0 name=(null) nametype=UNKNOWN',
+        'type=EOE msg=audit(5.0:7): ',
+    ]
+    with caplog.at_level(logging.DEBUG):
+        assert run(AuditAssembler(), ls) == []
+    assert "null name" in caplog.text
+
+
+def test_group_without_syscall_logged_at_debug(caplog):
+    ls = ['type=PATH msg=audit(5.0:7): item=0 name="/p"', 'type=EOE msg=audit(5.0:7): ']
+    with caplog.at_level(logging.DEBUG):
+        assert run(AuditAssembler(), ls) == []
+    assert "no SYSCALL" in caplog.text
+
+
+def test_long_token_line_is_fast():
+    line = "type=PATH msg=audit(1.0:1): " + "a" * 20000
+    start = time.perf_counter()
+    parse_record(line)
+    assert time.perf_counter() - start < 0.05
+
+
+def test_empty_tick_flushes_stale_group():
+    ls = [l for l in lines("audit_enriched.log")[2:7] if not l.startswith("type=EOE")]
+    a = AuditAssembler(flush_after=2.0)
+    run(a, ls, now=10.0)
+    assert [e.path for e in a.feed("", 12.0)] == ["/home/u/.aws/credentials"]

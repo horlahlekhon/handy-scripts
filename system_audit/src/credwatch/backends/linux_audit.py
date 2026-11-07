@@ -1,6 +1,8 @@
 """Linux auditd: record parser and event assembler."""
 from __future__ import annotations
 
+import logging
+import math
 import posixpath
 import re
 from collections.abc import Mapping
@@ -10,12 +12,14 @@ from types import MappingProxyType
 
 from credwatch.models import FileAccessEvent
 
+logger = logging.getLogger(__name__)
+
 BACKEND_NAME = "linux-audit"
 _GS = "\x1d"
 _KEY_SEPARATOR = "\x01"
 _HEX_FIELDS = frozenset({"name", "cwd", "exe", "comm", "proctitle", "key"})
 _HEADER = re.compile(r"^type=(\S+) msg=audit\((\d+(?:\.\d+)?):(\d+)\):\s?(.*)$", re.DOTALL)
-_FIELD = re.compile(r'([A-Za-z0-9_-]+)=("[^"]*"|\S*)')
+_FIELD = re.compile(r'(?<![^\s])([A-Za-z0-9_-]+)=("[^"]*"|\S*)')
 _HEX = re.compile(r"^(?:[0-9A-Fa-f]{2})+$")
 
 
@@ -43,10 +47,14 @@ def parse_record(line: str) -> AuditRecord | None:
         match = _HEADER.match(line.split(_GS, 1)[0].rstrip("\r\n"))
         if match is None:
             return None
-        rtype, epoch, serial, body = match.groups()
+        rtype, epoch_text, serial, body = match.groups()
+        epoch = float(epoch_text)
+        if not math.isfinite(epoch):
+            return None
+        datetime.fromtimestamp(epoch, tz=timezone.utc)  # reject unrepresentable epochs
         fields = {k: _decode_value(k, v) for k, v in _FIELD.findall(body)}
-        return AuditRecord(rtype, serial, float(epoch), MappingProxyType(fields))
-    except (ValueError, OverflowError):
+        return AuditRecord(rtype, serial, epoch, MappingProxyType(fields))
+    except (ValueError, OverflowError, OSError):
         return None
 
 
@@ -67,6 +75,7 @@ def _to_int(value: str | None) -> int | None:
 def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
     syscall = next((r for r in group.records if r.type == "SYSCALL"), None)
     if syscall is None:
+        logger.debug("audit group has no SYSCALL record; dropped: %s", group.lines)
         return []
     keys = (syscall.fields.get("key") or "").split(_KEY_SEPARATOR)
     if key not in keys:
@@ -81,6 +90,7 @@ def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
             continue
         name = rec.fields.get("name")
         if name is None:
+            logger.debug("PATH record has null name; skipped: %s", rec.fields)
             continue
         if cwd and not name.startswith("/"):
             name = posixpath.normpath(posixpath.join(cwd, name))
@@ -101,7 +111,11 @@ def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
 
 
 class AuditAssembler:
-    """Groups audit records by serial and emits events for the configured key."""
+    """Groups audit records by serial and emits events for the configured key.
+
+    Callers must send periodic ticks via ``feed("", now)`` so stale groups
+    (those that never receive an EOE record) get flushed.
+    """
 
     def __init__(self, key: str = "credwatch", flush_after: float = 2.0) -> None:
         self._key = key
@@ -116,8 +130,16 @@ class AuditAssembler:
             group.lines.append(line.rstrip("\r\n"))
             group.records.append(rec)
             if rec.type == "EOE":
-                events.extend(_build_events(self._groups.pop(rec.serial), self._key))
+                events.extend(self._build(rec.serial))
         stale = [s for s, g in self._groups.items() if now - g.first_seen >= self._flush_after]
         for serial in stale:
-            events.extend(_build_events(self._groups.pop(serial), self._key))
+            events.extend(self._build(serial))
         return events
+
+    def _build(self, serial: str) -> list[FileAccessEvent]:
+        group = self._groups.pop(serial)
+        try:
+            return _build_events(group, self._key)
+        except (ValueError, OverflowError, OSError):
+            logger.warning("dropping audit group serial=%s: build failed", serial, exc_info=True)
+            return []
