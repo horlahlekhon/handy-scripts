@@ -42,6 +42,7 @@ class CaptureConfig:
     rotate_seconds: int
     retain_files: int
     snaplen: int
+    drop_privileges_to: str
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,8 @@ def default_config_dict(os_name: str) -> dict[str, Any]:
             "rotate_seconds": 3600,
             "retain_files": 168,
             "snaplen": 0,
+            # macOS has no standard unprivileged capture user, so it keeps root.
+            "drop_privileges_to": "tcpdump" if os_name == "linux" else "root",
         },
         "email": {
             "smtp_host": "smtp.gmail.com",
@@ -193,6 +196,13 @@ def _str(section: Mapping[str, Any], name: str, key: str) -> str:
     value = section[key]
     if not isinstance(value, str):
         raise ConfigError(f"{name}.{key}: must be a string")
+    return value
+
+
+def _user_name(section: Mapping[str, Any], name: str, key: str) -> str:
+    value = _str(section, name, key)
+    if not value or any(c.isspace() for c in value):
+        raise ConfigError(f"{name}.{key}: must be a non-empty string without whitespace")
     return value
 
 
@@ -275,7 +285,7 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
     )
 
     cap = _section(
-        merged, "capture", {"enabled", "interface", "rotate_seconds", "retain_files", "snaplen"}
+        merged, "capture", {"enabled", "interface", "rotate_seconds", "retain_files", "snaplen", "drop_privileges_to"}
     )
     capture = CaptureConfig(
         enabled=_bool(cap, "capture", "enabled"),
@@ -283,6 +293,7 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
         rotate_seconds=_int(cap, "capture", "rotate_seconds", 1),
         retain_files=_int(cap, "capture", "retain_files", 1),
         snaplen=_int(cap, "capture", "snaplen", 0),
+        drop_privileges_to=_user_name(cap, "capture", "drop_privileges_to"),
     )
 
     em = _section(

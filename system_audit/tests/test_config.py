@@ -36,6 +36,7 @@ def test_defaults_use_root_owned_data_dir_and_expand_home(tmp_path, target, home
     assert cfg.target_user == "alice"
     assert cfg.env_scan.roots == (home,)
     assert cfg.env_scan.max_depth == 4
+    assert cfg.capture.drop_privileges_to == ("tcpdump" if os_name == "linux" else "root")
     assert cfg.capture.interface == ("any" if os_name == "linux" else "pktap,all")
     assert all("~" not in r.path_pattern for r in cfg.allowlist)
     assert AllowRule(str(home / ".gnupg/**"), ("gpg", "gpg-agent", "gpgsm")) in cfg.allowlist
@@ -109,6 +110,9 @@ def test_error_does_not_echo_secret_value(tmp_path, target):
         ({"allowlist": "nope"}, "allowlist"),
         ({"extra_paths": [1]}, "extra_paths[0]"),
         ({"capture": 5}, "capture"),
+        ({"capture": {"drop_privileges_to": ""}}, "capture.drop_privileges_to"),
+        ({"capture": {"drop_privileges_to": "a b"}}, "capture.drop_privileges_to"),
+        ({"capture": {"drop_privileges_to": 3}}, "capture.drop_privileges_to"),
     ],
 )
 def test_invalid_values_name_the_field(tmp_path, target, data, field):

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import logging
 import os
+import pwd
+import stat as stat_mod
 import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from credwatch.config import CaptureConfig
@@ -23,12 +25,16 @@ BACKOFF_RESET_UPTIME_SECONDS = 600
 SLEEP_SLICE_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 0.2
 PCAP_UMASK = 0o077
+CAPTURE_DIR_MODE = 0o700
+TERMINATE_WAIT_SECONDS = 5
+MAX_BACKOFF_EXPONENT = 10
+ROOT_USER = "root"
 
 
 def build_tcpdump_argv(cfg: CaptureConfig, out_dir: Path) -> list[str]:
     return [
         "tcpdump", "-i", cfg.interface, "-n", "-s", str(cfg.snaplen),
-        "-G", str(cfg.rotate_seconds), "-Z", "root",
+        "-G", str(cfg.rotate_seconds), "-Z", cfg.drop_privileges_to,
         "-w", str(out_dir / "credwatch-%Y%m%d-%H%M%S.pcap"),
     ]
 
@@ -63,10 +69,6 @@ class CaptureStatus:
     newest_file: Path | None
 
 
-def _restrict_umask() -> None:
-    os.umask(PCAP_UMASK)
-
-
 def _read_tail(stderr_file) -> str:
     try:
         stderr_file.flush()
@@ -88,6 +90,8 @@ class CaptureSupervisor:
         on_failure: Callable[[str], None],
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        getpwnam=pwd.getpwnam,
+        stat_fn=os.stat,
     ) -> None:
         self._cfg = cfg
         self._out_dir = out_dir
@@ -95,11 +99,15 @@ class CaptureSupervisor:
         self._on_failure = on_failure
         self._sleep = sleep
         self._clock = clock
+        self._getpwnam = getpwnam
+        self._stat = stat_fn
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._proc = None
-        self._status = CaptureStatus(False, 0, None, None)
+        self._last_prune = clock()
+        self._restarts = 0
+        self._last_error: str | None = None
 
     def start(self) -> None:
         if not self._cfg.enabled:
@@ -107,60 +115,80 @@ class CaptureSupervisor:
             return
         if self._thread is not None:
             return
+        problem = self._check_privilege_drop()
+        if problem is not None:
+            logger.error("capture not started: %s", problem)
+            self._last_error = problem
+            self._safe_on_failure(problem)
+            return
         self._thread = threading.Thread(target=self._run, name="credwatch-capture", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 10) -> None:
         self._stop.set()
-        with self._lock:
-            proc = self._proc
-        if proc is not None:
-            try:
-                proc.terminate()
-            except OSError:
-                logger.warning("could not terminate tcpdump", exc_info=True)
         thread = self._thread
         if thread is not None:
             thread.join(timeout)
-            if thread.is_alive() and proc is not None:
-                try:
-                    proc.kill()
-                except OSError:
-                    logger.warning("could not kill tcpdump", exc_info=True)
-                thread.join(timeout)
-        self._update(running=False)
 
     def status(self) -> CaptureStatus:
         with self._lock:
-            status = self._status
+            proc = self._proc
+        running = proc is not None and proc.poll() is None
         files = _list_captures(self._out_dir)
-        return replace(status, newest_file=files[-1] if files else None)
+        return CaptureStatus(running, self._restarts, self._last_error, files[-1] if files else None)
 
-    def _update(self, **changes) -> None:
-        with self._lock:
-            self._status = replace(self._status, **changes)
+    def _check_privilege_drop(self) -> str | None:
+        user = self._cfg.drop_privileges_to
+        if user == ROOT_USER:
+            return None
+        message = (
+            f"captures dir must be owned by {user} mode 0700; re-run credwatch install"
+        )
+        try:
+            uid = self._getpwnam(user).pw_uid
+        except KeyError:
+            return f"capture user {user!r} does not exist; {message}"
+        try:
+            st = self._stat(self._out_dir)
+        except OSError as exc:
+            return f"cannot stat {self._out_dir} ({exc}); {message}"
+        if st.st_uid != uid or stat_mod.S_IMODE(st.st_mode) != CAPTURE_DIR_MODE:
+            return message
+        return None
 
     def _prune(self) -> None:
         prune_captures(self._out_dir, self._cfg.retain_files)
+        self._last_prune = self._clock()
 
     def _run(self) -> None:
         failures = 0
-        self._prune()
+        self._guarded(self._prune)
         while not self._stop.is_set():
             started = self._clock()
-            error = self._run_once()
+            try:
+                error = self._run_once()
+            except Exception as exc:
+                logger.exception("capture supervisor iteration failed")
+                error = f"supervisor error: {exc!r}"
             if self._stop.is_set():
                 break
             if self._clock() - started >= BACKOFF_RESET_UPTIME_SECONDS:
                 failures = 0
-            delay = min(BACKOFF_BASE_SECONDS * 2**failures, BACKOFF_MAX_SECONDS)
+            delay = min(BACKOFF_BASE_SECONDS * 2 ** min(failures, MAX_BACKOFF_EXPONENT), BACKOFF_MAX_SECONDS)
             failures += 1
-            self._update(running=False, last_error=error)
+            self._last_error = error
             self._safe_on_failure(error)
             self._backoff(delay)
             if self._stop.is_set():
                 break
-            self._update(restarts=self._status.restarts + 1)
+            self._restarts += 1
+
+    @staticmethod
+    def _guarded(fn: Callable[[], None]) -> None:
+        try:
+            fn()
+        except Exception:
+            logger.exception("capture housekeeping failed")
 
     def _safe_on_failure(self, message: str) -> None:
         try:
@@ -181,27 +209,44 @@ class CaptureSupervisor:
         with tempfile.TemporaryFile() as stderr_file:
             try:
                 proc = self._popen(
-                    argv, stdout=subprocess.DEVNULL, stderr=stderr_file,
-                    preexec_fn=_restrict_umask,
+                    argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=stderr_file, umask=PCAP_UMASK,
                 )
             except OSError as exc:
                 logger.error("failed to spawn tcpdump: %s", exc)
                 return f"spawn failed: {exc}"
             with self._lock:
                 self._proc = proc
-                self._status = replace(self._status, running=True)
-            logger.info("tcpdump started: %s", " ".join(argv))
-            last_prune = self._clock()
-            while proc.poll() is None and not self._stop.is_set():
-                if self._clock() - last_prune >= self._cfg.rotate_seconds:
-                    self._prune()
-                    last_prune = self._clock()
-                self._stop.wait(POLL_INTERVAL_SECONDS)
-            code = proc.poll()
-            with self._lock:
-                self._proc = None
-            if self._stop.is_set():
-                return ""
-            tail = _read_tail(stderr_file)
-            logger.warning("tcpdump exited with code %s", code)
-            return tail or f"tcpdump exited with code {code}"
+            try:
+                if self._stop.is_set():
+                    return ""
+                logger.info("tcpdump started: %s", " ".join(argv))
+                while proc.poll() is None and not self._stop.is_set():
+                    if self._clock() - self._last_prune >= self._cfg.rotate_seconds:
+                        self._guarded(self._prune)
+                    self._stop.wait(POLL_INTERVAL_SECONDS)
+                code = proc.poll()
+                if self._stop.is_set():
+                    return ""
+                tail = _read_tail(stderr_file)
+                logger.warning("tcpdump exited with code %s", code)
+                return tail or f"tcpdump exited with code {code}"
+            finally:
+                self._reap(proc)
+                with self._lock:
+                    self._proc = None
+
+    @staticmethod
+    def _reap(proc) -> None:
+        """Ensure the child is gone: terminate, then kill if it ignores SIGTERM."""
+        if proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=TERMINATE_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning("tcpdump ignored terminate; killing")
+            proc.kill()
+            proc.wait()
+        except OSError:
+            logger.warning("could not terminate tcpdump", exc_info=True)
