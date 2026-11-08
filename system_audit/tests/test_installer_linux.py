@@ -26,6 +26,7 @@ class AuditFake:
         self.loaded: list[str] = []
         self.calls: list[tuple[str, ...]] = []
         self.fail: dict[tuple[str, ...], str] = {}
+        self.need_reload = False
 
     def run(self, argv, *, check=False, timeout=60):
         argv = tuple(argv)
@@ -41,6 +42,10 @@ class AuditFake:
             out = "\n".join(self.loaded) + "\n" if self.loaded else "No rules\n"
         elif argv == ("auditctl", "-s"):
             out = f"enabled {self.enabled}\n"
+        elif argv[:2] == ("systemctl", "show"):
+            out = "yes\n" if self.need_reload else "no\n"
+        elif argv == ("systemctl", "daemon-reload"):
+            self.need_reload = False
         return subprocess.CompletedProcess(argv, 0, out, "")
 
     def count(self, *prefix):
@@ -78,7 +83,10 @@ def env(tmp_path, monkeypatch):
     (home / ".aws" / "credentials").write_text("x")
     target = TargetUser(ME.pw_name, ME.pw_uid, ME.pw_gid, home)
     exe = Path("/opt/pipx/bin/credwatch")
-    monkeypatch.setattr(linux, "assert_root_owned_install", lambda *a, **k: None)
+    trust_checked: list[Path] = []
+    monkeypatch.setattr(
+        linux, "assert_root_owned_install", lambda exe, *a, **k: trust_checked.append(exe)
+    )
     runner = AuditFake(root)
 
     def install(**kw):
@@ -88,7 +96,7 @@ def env(tmp_path, monkeypatch):
         )
 
     return SimpleNamespace(root=root, etc=etc, home=home, target=target, exe=exe,
-                           runner=runner, install=install,
+                           runner=runner, install=install, trust_checked=trust_checked,
                            data=root / "var/lib/credwatch")
 
 
@@ -179,6 +187,26 @@ def test_changed_executable_rewrites_unit_and_reloads(env):
     assert "ExecStart=/usr/local/bin/credwatch run" in (env.root / UNIT).read_text()
     assert env.runner.count("systemctl", "daemon-reload") == 1
     assert any("credwatch.service" in c for c in report.created)
+
+
+def test_rerun_after_failed_daemon_reload_reloads(env):
+    env.runner.fail[("systemctl", "daemon-reload")] = "Failed to reload"
+    with pytest.raises(InstallError, match="daemon-reload"):
+        env.install()
+    env.runner.need_reload = True  # systemd sees the unit changed on disk
+    del env.runner.fail[("systemctl", "daemon-reload")]
+    env.runner.reset()
+    report = env.install()
+    assert any("credwatch.service" in u for u in report.unchanged)
+    assert env.runner.count("systemctl", "daemon-reload") == 1
+
+
+def test_failing_need_reload_query_reloads(env):
+    env.install()
+    env.runner.fail[("systemctl", "show")] = "bus error"
+    env.runner.reset()
+    env.install()
+    assert env.runner.count("systemctl", "daemon-reload") == 1
 
 
 def test_executable_with_whitespace_refused(env):
@@ -300,10 +328,31 @@ def test_symlinked_captures_dir_refused(env, tmp_path):
         env.install()
 
 
-def test_stranger_owned_existing_file_in_data_dir_refused(env):
+def _fake_owner(monkeypatch, suffix: str, uid: int = 4242):
+    """Report a foreign owner for the fd opened at a path ending with suffix."""
+    real = os.fstat
+
+    def fstat(fd):
+        st = real(fd)
+        if os.readlink(f"/proc/self/fd/{fd}").endswith(suffix):
+            return SimpleNamespace(st_uid=uid, st_gid=st.st_gid, st_mode=st.st_mode)
+        return st
+
+    monkeypatch.setattr(os, "fstat", fstat)
+
+
+def test_stranger_owned_captures_dir_refused(env, monkeypatch):
     env.install()
-    with pytest.raises(InstallError, match="owned by uid"):
-        common.bootstrap_config(env.data / "canary", owner_uid=os.geteuid() + 1)
+    _fake_owner(monkeypatch, "/var/lib/credwatch/captures")
+    with pytest.raises(InstallError, match="captures is owned by uid 4242"):
+        env.install()
+
+
+def test_stranger_owned_existing_file_in_data_dir_refused(env, monkeypatch):
+    env.install()
+    _fake_owner(monkeypatch, "/var/lib/credwatch/canary")
+    with pytest.raises(InstallError, match="canary: owned by uid 4242"):
+        env.install()
 
 
 def test_data_dir_must_be_absolute(env):
@@ -335,12 +384,59 @@ def test_install_rejects_unsafe_executable_before_writing(env, monkeypatch):
     assert not (env.etc / "secrets.env").exists()
 
 
-def test_default_executable_discovery(monkeypatch, tmp_path):
-    monkeypatch.setattr(linux.shutil, "which", lambda name: "/usr/local/bin/credwatch")
-    assert linux.find_executable() == Path("/usr/local/bin/credwatch")
-    monkeypatch.setattr(linux.shutil, "which", lambda name: None)
-    monkeypatch.setattr(linux.sys, "argv", [str(tmp_path / "credwatch")])
-    assert linux.find_executable() == tmp_path / "credwatch"
+def _script(path: Path, shebang: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!{shebang}\nimport credwatch\n")
+    return path
+
+
+def test_execstart_is_running_entry_point_not_which(env, monkeypatch, tmp_path):
+    real = _script(tmp_path / "venv/bin/credwatch", "/venv/bin/python")
+    link = tmp_path / "localbin" / "credwatch"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    monkeypatch.setattr(linux.sys, "argv", [str(link), "install"])
+    monkeypatch.setattr(linux.shutil, "which", lambda name: "/usr/bin/some-other-credwatch")
+    env.install(executable=None)
+    assert f"ExecStart={link} run" in (env.root / UNIT).read_text()
+    assert env.trust_checked == [link]
+
+
+def test_relative_argv0_made_absolute(monkeypatch, tmp_path):
+    _script(tmp_path / "credwatch", "/x/python")
+    monkeypatch.chdir(tmp_path)
+    assert linux.find_executable("credwatch") == tmp_path / "credwatch"
+
+
+@pytest.mark.parametrize("argv0", ["/v/lib/credwatch/__main__.py", "/v/lib/credwatch/cli.py"])
+def test_python_m_invocation_refused(argv0):
+    with pytest.raises(InstallError, match="run install via the installed `credwatch` command"):
+        linux.find_executable(argv0)
+
+
+def test_which_fallback_requires_own_interpreter(tmp_path):
+    prefix = tmp_path / "venv"
+    good = _script(tmp_path / "bin/credwatch", f"{prefix}/bin/python")
+    found = linux.find_executable("credwatch", which=lambda n: str(good), prefix=prefix)
+    assert found == good
+
+
+def test_which_fallback_foreign_interpreter_refused(tmp_path):
+    other = _script(tmp_path / "bin/credwatch", "/usr/bin/python3")
+    with pytest.raises(InstallError, match="does not run this credwatch"):
+        linux.find_executable("credwatch", which=lambda n: str(other), prefix=tmp_path / "venv")
+
+
+def test_which_fallback_without_shebang_refused(tmp_path):
+    other = tmp_path / "credwatch"
+    other.write_bytes(b"\x7fELF")
+    with pytest.raises(InstallError, match="does not run this credwatch"):
+        linux.find_executable("credwatch", which=lambda n: str(other), prefix=tmp_path)
+
+
+def test_no_entry_point_found_refused():
+    with pytest.raises(InstallError, match="cannot locate"):
+        linux.find_executable("credwatch", which=lambda n: None)
 
 
 # --- bootstrap ------------------------------------------------------------------

@@ -13,14 +13,14 @@ import pwd
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import credwatch
-from credwatch.allowlist import is_root_controlled_file
+from credwatch.allowlist import is_root_controlled_dir, is_root_controlled_file
 from credwatch.config import Config
 from credwatch.safe_fs import UnsafePathError, open_dir_chain
 
@@ -87,15 +87,11 @@ def template_text(name: str) -> str:
 # --- install location -----------------------------------------------------------
 
 
-def _first_untrusted(paths: Iterable[Path], stat_fn: Callable[[str], Any]) -> Path | None:
-    for path in paths:
-        if not is_root_controlled_file(str(path), stat_fn):
-            return path
-    return None
-
-
-def _file_and_ancestors(path: Path) -> tuple[Path, ...]:
-    return (path, *path.parents)
+def _is_trusted(path: Path, stat_fn: Callable[[str], Any]) -> bool:
+    """path itself plus every ancestor up to '/' is root-controlled (allowlist predicates)."""
+    return is_root_controlled_file(str(path), stat_fn) and is_root_controlled_dir(
+        str(path.parent), stat_fn
+    )
 
 
 def _variants(path: Path) -> tuple[Path, ...]:
@@ -129,9 +125,11 @@ def assert_root_owned_install(
     problems = []
     for label, path in checks:
         for variant in _variants(path):
-            bad = _first_untrusted(_file_and_ancestors(variant), stat_fn)
-            if bad is not None:
-                problems.append(f"{label} {variant}: {bad} is not root-owned or is writable by others")
+            if not _is_trusted(variant, stat_fn):
+                problems.append(
+                    f"{label} {variant}: it or an ancestor dir is not root-owned "
+                    "or is writable by non-root"
+                )
                 break
     if problems:
         raise InstallError("unsafe install location: " + "; ".join(problems) + f"; {REINSTALL_HINT}")
@@ -359,4 +357,13 @@ def write_if_changed(path: Path, content: str, mode: int) -> bool:
         logger.exception("failed writing %s", path)
         Path(tmp).unlink(missing_ok=True)
         raise
+    _fsync_dir(path.parent)
     return True
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
