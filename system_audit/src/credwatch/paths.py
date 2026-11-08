@@ -94,20 +94,25 @@ def _is_strictly_inside(path: Path, homes: tuple[Path, ...]) -> bool:
     return any(path != h and h in path.parents for h in homes)
 
 
-def _with_resolved(path: Path, homes: tuple[Path, ...]) -> tuple[Path, ...]:
+def _with_resolved(path: Path, homes: tuple[Path, ...]) -> tuple[tuple[Path, ...], Path | None]:
+    """Return (paths to watch, symlink target skipped as outside home/unsafe or None)."""
     full = _resolve(path)
     if full is None or full == path:
-        return (path,)
+        return (path,), None
     if not os.path.lexists(full):
         logger.warning("dangling symlink %s -> %s; watching link only", path, full)
-        return (path,)
+        return (path,), None
     if not _is_strictly_inside(full, homes) or not _is_safe(full):
         logger.warning("symlink %s resolves outside home to %s; not watching target", path, full)
-        return (path,)
-    return (path, full)
+        return (path,), full
+    return (path, full), None
 
 
-def resolve_watch_paths(cfg: Config) -> tuple[Path, ...]:
+SkippedTarget = tuple[Path, Path]
+
+
+def resolve_watch_paths_report(cfg: Config) -> tuple[tuple[Path, ...], tuple[SkippedTarget, ...]]:
+    """Watch paths plus (link, target) pairs whose target was not watched (outside home/unsafe)."""
     homes = tuple({cfg.home, _resolve(cfg.home) or cfg.home})
     defaults = (_expand_home(p, cfg.home) for p in DEFAULT_SENSITIVE_PATHS)
     candidates = (
@@ -117,11 +122,17 @@ def resolve_watch_paths(cfg: Config) -> tuple[Path, ...]:
         cfg.data_dir / "canary",
     )
     existing = {p for p in candidates if _is_safe(p) and os.path.lexists(p)}
-    expanded = {q for p in existing for q in _with_resolved(p, homes)}
+    resolved = {p: _with_resolved(p, homes) for p in existing}
+    expanded = {q for watched, _ in resolved.values() for q in watched}
     allowed = {p for p in expanded if not _is_home_or_ancestor(p, homes)}
     dirs = {p for p in allowed if p.is_dir()}
     kept = {p for p in allowed if not any(d != p and d in p.parents for d in dirs)}
-    return tuple(sorted(kept))
+    skipped = tuple(sorted((p, t) for p, (_, t) in resolved.items() if t is not None))
+    return tuple(sorted(kept)), skipped
+
+
+def resolve_watch_paths(cfg: Config) -> tuple[Path, ...]:
+    return resolve_watch_paths_report(cfg)[0]
 
 
 class WatchMatcher:

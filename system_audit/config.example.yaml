@@ -2,8 +2,8 @@
 # Only keys you want to change are needed; everything is deep-merged over defaults.
 # SMTP credentials are NOT configured here (see secrets.env).
 
-# data_dir: ~/.local/share/credwatch          # linux default
-# data_dir: ~/Library/Application Support/credwatch   # macOS default
+# data_dir: /var/lib/credwatch                       # linux default (root-owned)
+# data_dir: /Library/Application Support/credwatch   # macOS default (root-owned)
 
 extra_paths: []
 

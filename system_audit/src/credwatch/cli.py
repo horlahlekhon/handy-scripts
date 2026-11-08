@@ -500,7 +500,30 @@ def cmd_install(args: argparse.Namespace) -> int:
     except ImportError:
         logger.exception("installer import failed")
         raise
-    return int(run_install(user=args.install_user or args.user, start=not args.no_start) or 0)
+    from credwatch.installer import InstallError
+
+    try:
+        target = resolve_target_user(args.install_user or args.user, os.environ)
+        report = run_install(
+            current_os(), target, runner=SubprocessRunner(), start=not args.no_start
+        )
+    except (InstallError, *STARTUP_ERRORS) as exc:
+        logger.error("install failed", exc_info=True)
+        print(f"credwatch install failed: {_safe(exc)}", file=sys.stderr)
+        return EXIT_FAILURE
+    _print_install_report(report)
+    return EXIT_OK
+
+
+def _print_install_report(report) -> None:
+    for label, items in (("created", report.created), ("unchanged", report.unchanged)):
+        for item in items:
+            print(f"{label + ':':<11}{_safe(item)}")
+    for warning in report.warnings:
+        print(f"warning:   {_safe(warning)}", file=sys.stderr)
+    print(f"watched:   {report.watched} paths")
+    for path in report.skipped:
+        print(f"skipped:   {_safe(path)} (whitespace/control characters; not watchable by auditd)")
 
 
 # --- parser -------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+[Unit]
+Description=credwatch credential-file access monitor
+After=auditd.service network-online.target
+Wants=auditd.service network-online.target
+[Service]
+Type=simple
+ExecStart={executable} run --config /etc/credwatch/config.yaml
+EnvironmentFile=/etc/credwatch/secrets.env
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+[Install]
+WantedBy=multi-user.target

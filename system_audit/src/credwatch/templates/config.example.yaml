@@ -1,0 +1,39 @@
+# Template. The real file lives at /etc/credwatch/config.yaml (root-owned).
+# Only keys you want to change are needed; everything is deep-merged over defaults.
+# SMTP credentials are NOT configured here (see secrets.env).
+
+# data_dir: /var/lib/credwatch                       # linux default (root-owned)
+# data_dir: /Library/Application Support/credwatch   # macOS default (root-owned)
+
+extra_paths: []
+
+env_scan:
+  roots: ["~"]
+  max_depth: 4
+  excludes: [node_modules, .git, venv, .venv]
+
+capture:
+  enabled: true
+  interface: any          # macOS default: pktap,all
+  rotate_seconds: 3600
+  retain_files: 168
+  snaplen: 0
+  drop_privileges_to: tcpdump   # tcpdump -Z user; macOS has no standard capture user, use root
+
+email:
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  from_addr: you@example.com
+  to_addrs: [you@example.com]
+  digest_hour: 8
+  send_immediately: true
+  coalesce_seconds: 60
+
+audit_export:
+  interval_minutes: 60
+  retention_days: 30
+
+# Setting `allowlist` REPLACES the built-in defaults (the canary rule is always added).
+# allowlist:
+#   - path_pattern: "~/.ssh/**"
+#     processes: [ssh, git, scp, sftp, rsync]

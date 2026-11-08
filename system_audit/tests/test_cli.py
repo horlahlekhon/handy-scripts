@@ -400,6 +400,55 @@ def test_install_without_installer_exits_2(env, monkeypatch, capsys):
     assert "installer not available yet" in capsys.readouterr().err
 
 
+def _fake_install(monkeypatch, report=None, error=None):
+    import credwatch.installer as installer_mod
+    calls = []
+
+    def fake(os_name, target, *, runner, start=True, **kw):
+        calls.append((os_name, target, runner, start))
+        if error is not None:
+            raise error
+        return report
+
+    monkeypatch.setattr(installer_mod, "run_install", fake)
+    return calls
+
+
+def test_install_builds_args_and_prints_report(env, monkeypatch, capsys):
+    import os
+    from credwatch.installer import InstallReport
+    import pwd
+    me = pwd.getpwuid(os.getuid()).pw_name
+    report = InstallReport(
+        created=("directory /var/lib/credwatch",), unchanged=("file /etc/credwatch/config.yaml",),
+        warnings=("fill in secrets",), watched=4, skipped=(Path("/h/a b/.env"),),
+    )
+    calls = _fake_install(monkeypatch, report)
+    assert cli.main([*env["argv"], "install", "--user", me, "--no-start"]) == 0
+    os_name, target, runner, start = calls[0]
+    assert os_name == "linux" and target.name == me and start is False
+    assert isinstance(runner, FakeRunner)
+    out, err = capsys.readouterr()
+    assert "created:   directory /var/lib/credwatch" in out
+    assert "unchanged: file /etc/credwatch/config.yaml" in out
+    assert "watched:   4 paths" in out
+    assert "skipped:   /h/a b/.env" in out
+    assert "warning:   fill in secrets" in err
+
+
+def test_install_error_exits_nonzero(env, monkeypatch, capsys):
+    from credwatch.installer import InstallError
+    _fake_install(monkeypatch, error=InstallError("audit rules are immutable (-e 2)"))
+    assert cli.main([*env["argv"], "install"]) == 1
+    assert "immutable (-e 2)" in capsys.readouterr().err
+
+
+def test_install_unknown_user_exits_nonzero(env, monkeypatch, capsys):
+    _fake_install(monkeypatch)
+    assert cli.main([*env["argv"], "install", "--user", "no-such-user-credwatch"]) == 1
+    assert "no such user" in capsys.readouterr().err
+
+
 # --- get_backend ----------------------------------------------------------------
 
 

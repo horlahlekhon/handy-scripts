@@ -12,6 +12,7 @@ from credwatch.paths import (
     WatchMatcher,
     read_watch_list,
     resolve_watch_paths,
+    resolve_watch_paths_report,
     scan_env_files,
     write_watch_list,
 )
@@ -215,3 +216,24 @@ def test_matcher_normalizes_dotdot(home):
 def test_matcher_case_insensitive(home):
     assert not WatchMatcher([home / ".aws"]).matches(str(home / ".AWS" / "c"))
     assert WatchMatcher([home / ".aws"], case_insensitive=True).matches(str(home / ".AWS" / "c"))
+
+
+def test_report_lists_symlink_targets_outside_home(cfg, home, tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "netrc").write_text("x")
+    (home / ".netrc").symlink_to(outside / "netrc")
+    (home / ".npmrc").write_text("x")
+    paths, skipped = resolve_watch_paths_report(cfg)
+    assert home / ".netrc" in paths
+    assert (outside / "netrc").resolve() not in paths
+    assert skipped == ((home / ".netrc", (outside / "netrc").resolve()),)
+    assert paths == resolve_watch_paths(cfg)
+
+
+def test_report_has_no_skips_for_inside_home_targets(cfg, home):
+    (home / "dotfiles").mkdir()
+    (home / "dotfiles" / "npmrc").write_text("x")
+    (home / ".npmrc").symlink_to(home / "dotfiles" / "npmrc")
+    _, skipped = resolve_watch_paths_report(cfg)
+    assert skipped == ()
