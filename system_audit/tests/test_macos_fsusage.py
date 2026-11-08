@@ -1,4 +1,7 @@
+import collections
 import io
+import random
+import string
 import stat
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -15,10 +18,11 @@ from credwatch.backends.macos_fsusage import (
     FS_USAGE_ARGV,
     STALE_OUTPUT_SECONDS,
     MISS_LOG_INTERVAL_SECONDS,
+    RELEVANT_OPS,
     FsUsageHit,
     MacFsUsageBackend,
     parse_fs_usage_line,
-    parse_fs_usage_line_detail,
+    parse_fs_usage_hits,
     resolve_pid,
 )
 from credwatch.config import load_config
@@ -150,7 +154,7 @@ def test_small_clock_skew_keeps_today(matcher):
 
 @pytest.mark.parametrize(
     "line",
-    ["", "garbage", "99:99:99.000000  open  F=3 (R_____)  /Users/alice/.netrc  0.1  cat.1",
+    ["", "garbage",
      "23:59:58.1  open  F=3 (R_____)  relative/.netrc  0.1  cat.1",
      "23:59:58.1  open  F=3 (R_____)  /Users/alice/.netrc-old  0.1  noTid",
      "23:59:58.1  stat64  /Users/alice/.netrc  0.1  noTid"],
@@ -176,18 +180,118 @@ def test_process_name_longer_than_maxcomlen_falls_back_to_unknown(matcher):
 
 def test_watched_line_without_tid_still_flagged(matcher):
     line = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   cat"
-    hit, miss = parse_fs_usage_line_detail(line, matcher, TODAY, NOW)
+    (hit,), miss = parse_fs_usage_hits(line, matcher, TODAY, NOW)
     assert (hit.path, hit.proc_name, hit.tid) == ("/Users/alice/.netrc", "?", None)
     assert miss is not None
     bare = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/id_rsa"
     assert _parse(bare, matcher).path == "/Users/alice/.ssh/id_rsa"
 
 
-def test_unparseable_timestamp_on_watched_path_is_a_miss(matcher):
+def test_unparseable_timestamp_on_watched_path_uses_read_time(matcher):
     line = "99:99:99.000000  open  F=3 (R_____)  /Users/alice/.netrc  0.1  cat.1"
-    assert parse_fs_usage_line_detail(line, matcher, TODAY, NOW) == (
-        None, "unparseable timestamp on a watched path",
-    )
+    (hit,), miss = parse_fs_usage_hits(line, matcher, TODAY, NOW)
+    assert hit.path == "/Users/alice/.netrc" and hit.timestamp == NOW.astimezone(timezone.utc)
+    assert miss == "unparseable timestamp; used read time"
+
+
+def _hits(line, matcher):
+    return parse_fs_usage_hits(line, matcher, TODAY, NOW)
+
+
+def test_float_token_in_process_name_still_flagged(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc"
+            "   0.000010   a 1.1 b.4242")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.netrc", "?", None)]
+    assert miss is not None
+
+
+def test_name_with_W_and_float_still_flagged(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc"
+            "   0.000010   x 0.5 W cat.4242")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.netrc", "?")]
+    assert miss is not None
+
+
+def test_rename_with_watched_source_flagged(matcher):
+    line = ("23:59:58.100000  rename  /Users/alice/.netrc /tmp/stolen"
+            "      0.000040   mv.4242")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.op) for h in hits] == [("/Users/alice/.netrc", "?", "rename")]
+    assert miss is not None
+
+
+def test_rename_with_watched_destination_flagged(matcher):
+    line = ("23:59:58.100000  renameat  /tmp/evil /Users/alice/.aws/credentials"
+            "      0.000040   mv.4242")
+    hits, _ = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.aws/credentials", "?")]
+
+
+def test_rename_between_two_watched_paths_gives_one_hit_each(matcher):
+    line = ("23:59:58.100000  rename  /Users/alice/.netrc /Users/alice/.ssh/netrc"
+            "      0.000040   mv.4242")
+    hits, _ = _hits(line, matcher)
+    assert {h.path for h in hits} == {"/Users/alice/.netrc", "/Users/alice/.ssh/netrc"}
+    assert all(h.proc_name == "?" for h in hits)
+
+
+def test_directory_watch_missplit_reports_real_path(matcher):
+    # Greedy tail puts "   0.000010   evil" into the path; still "inside" ~/.ssh.
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/id_rsa"
+            "   0.000010   evil 2.5 x.4242")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.ssh/id_rsa", "?")]
+    assert "disagrees" in miss
+
+
+def test_directory_watch_path_with_spaces_parsed_strictly(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/my key"
+            "      0.000010   ssh.4242")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [
+        ("/Users/alice/.ssh/my key", "ssh", 4242)
+    ]
+    assert miss is None
+
+
+def test_sibling_after_full_parse_is_silently_ignored(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc-old"
+            "      0.000010   cat.4242")
+    assert _hits(line, matcher) == ((), None)
+
+
+def test_watched_path_inside_longer_path_not_reported(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /private/Users/alice/.netrc"
+            "      0.000010   cat.4242")
+    assert _hits(line, matcher) == ((), None)
+
+
+_NAME_ALPHABET = string.ascii_letters + string.digits + string.punctuation + "      ."
+_NAME_PIECES = (" W ", " 0.5 ", " 1.000010 ", "..", ".123", " ", "W", "9.9")
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_random_attacker_names_never_hide_watched_path(matcher, seed):
+    rng = random.Random(seed)
+    targets = [
+        "/Users/alice/.netrc", "/Users/alice/.aws/credentials", "/Users/alice/.ssh/id_x",
+        "/Library/Application Support/credwatch/canary", "/Users/alice/.ssh/a b",
+    ]
+    for _ in range(500):
+        target = rng.choice(targets)
+        name = "".join(
+            rng.choice(_NAME_PIECES) if rng.random() < 0.3 else rng.choice(_NAME_ALPHABET)
+            for _ in range(rng.randint(1, 24))
+        )
+        op = rng.choice(sorted(RELEVANT_OPS))
+        gap = " " * rng.randint(2, 8)
+        line = f"23:59:58.{rng.randint(0, 999999):06d}  {op}  F=3  (R_____)  {target}{gap}0.000010   {name}.{rng.randint(1, 10**7)}"
+        hits, _ = _hits(line, matcher)
+        assert hits, line
+        assert all(matcher.matches(h.path) for h in hits), line
+        assert target in {h.path for h in hits}, line
 
 
 # --- pid resolution ---------------------------------------------------------------
@@ -594,3 +698,35 @@ def test_pipes_closed_after_stream(tmp_path):
     popen = FakePopen([])
     _drain(_backend(tmp_path, popen))
     assert popen.stdout.closed and popen.stderr.closed
+
+
+def test_loose_extension_stops_when_no_longer_watched(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc x"
+            "      0.000010   cat.42")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.netrc", "?")]
+    assert "disagrees" in miss
+
+
+def test_casefold_length_change_still_finds_path(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc"
+            "      0.000010   straße.42")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.netrc", "straße", 42)]
+    assert miss is None
+
+
+def test_stderr_closed_during_teardown_is_not_a_warning(caplog):
+    from credwatch.backends.macos_fsusage import _drain_stderr
+
+    class Closed:
+        def __iter__(self):
+            raise ValueError("I/O operation on closed file")
+
+    done = threading.Event()
+    done.set()
+    _drain_stderr(SimpleNamespace(stderr=Closed()), collections.deque(), done)
+    assert "could not read" not in caplog.text
+    _drain_stderr(SimpleNamespace(stderr=Closed()), collections.deque(),
+                  threading.Event())
+    assert "could not read fs_usage stderr" in caplog.text

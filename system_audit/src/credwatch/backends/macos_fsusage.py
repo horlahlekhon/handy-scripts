@@ -54,11 +54,8 @@ _HEAD = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<op>\S+)\s+(?P<re
 _TAIL = re.compile(
     rf"^(?P<mid>.*)\s+\d+\.\d+(?:\s+W)?\s+(?P<proc>.{{1,{MAXCOMLEN}}})\.(?P<tid>\d+)\s*$"
 )
-# Fallback when the name.tid tail is missing or mangled: drop a trailing elapsed column.
-_LOOSE_TAIL = re.compile(r"^(?P<mid>.*)\s+\d+\.\d+(?:\s+W)?(?:\s+.*)?$")
 _PATH = re.compile(r"(?:^|\s)(/.*)$")
 _ERRNO = re.compile(r"\[\s*(\d+)\]")
-_WS = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -83,66 +80,125 @@ def _timestamp(text: str, today: date, now: datetime) -> datetime | None:
     return local.astimezone(timezone.utc)
 
 
-def _loose_path(candidate: str, matcher: WatchMatcher) -> str | None:
-    """Longest whitespace-cut prefix of candidate that is a watched path."""
-    cuts = [m.start() for m in _WS.finditer(candidate)]
-    for end in [len(candidate), *reversed(cuts)]:
-        path = candidate[:end].rstrip()
-        if path and matcher.matches(path):
-            return path
-    return None
+def _watched_needles(matcher: WatchMatcher) -> tuple[frozenset[str], bool]:
+    """The matcher's normalised watched paths and whether they are casefolded.
+
+    WatchMatcher exposes no public accessor; reading its private fields keeps
+    the loose search and the matcher on exactly the same normalisation.
+    """
+    return matcher._exact, matcher._fold  # noqa: SLF001
 
 
-def parse_fs_usage_line_detail(
+def _extend(rest: str, start: int, end: int, matcher: WatchMatcher) -> str | None:
+    """Longest watched path starting at rest[start:end] (an occurrence of a watched path)."""
+    n = len(rest)
+    if end < n and not (rest[end].isspace() or rest[end] == "/"):
+        return None  # a sibling such as `.netrc-old`, not the watched path
+    best = rest[start:end]
+    e = end
+    while e < n and not rest[e].isspace():
+        e += 1
+    if matcher.matches(rest[start:e]):
+        best = rest[start:e]
+        # Cross single spaces (paths may contain them) while the result is still
+        # watched; a token starting with '/' is a second path (rename), so stop.
+        while e + 1 < n and rest[e] == " " and not rest[e + 1].isspace() and rest[e + 1] != "/":
+            f = e + 1
+            while f < n and not rest[f].isspace():
+                f += 1
+            if not matcher.matches(rest[start:f]):
+                break
+            best, e = rest[start:f], f
+    return best if matcher.matches(best) else None
+
+
+def _loose_paths(rest: str, matcher: WatchMatcher) -> tuple[tuple[str, int], ...]:
+    """Every watched path occurring in rest at a path boundary: ((path, offset), ...)."""
+    needles, fold = _watched_needles(matcher)
+    haystack = rest.casefold() if fold else rest
+    if len(haystack) != len(rest):  # casefold changed lengths: offsets would not line up
+        haystack = rest
+    found: dict[str, int] = {}
+    for needle in needles:
+        i = haystack.find(needle)
+        while i != -1:
+            if i == 0 or rest[i - 1].isspace():
+                path = _extend(rest, i, i + len(needle), matcher)
+                if path is not None:
+                    found.setdefault(path, i)
+            i = haystack.find(needle, i + 1)
+    # Drop paths that are strict prefixes of another found path at the same offset.
+    kept = {
+        p: i for p, i in found.items()
+        if not any(q != p and j == i and q.startswith(p) for q, j in found.items())
+    }
+    return tuple(sorted(kept.items(), key=lambda item: (item[1], item[0])))
+
+
+def _strict(rest: str, matcher: WatchMatcher) -> tuple[str, str, int, int] | None:
+    """(path, proc_name, tid, path offset) from the right-anchored tail, if it parses."""
+    tail = _TAIL.match(rest)
+    if tail is None:
+        return None
+    found = _PATH.search(tail.group("mid"))
+    if found is None:
+        return None
+    return found.group(1).rstrip(), tail.group("proc").strip(), int(tail.group("tid")), found.start(1)
+
+
+def parse_fs_usage_hits(
     line: str, matcher: WatchMatcher, today: date, now: datetime
-) -> tuple[FsUsageHit | None, str | None]:
-    """(hit, miss). `miss` explains a line that names a relevant op but parsed badly.
+) -> tuple[tuple[FsUsageHit, ...], str | None]:
+    """(hits, miss) for one fs_usage line; one hit per distinct watched path.
 
-    Fail closed: if the name.tid tail is unparseable but a watched path is
-    present, the hit is still returned with proc_name=UNKNOWN_PROC, tid=None.
+    Invariant: a relevant-op line in which a watched path occurs at a path
+    boundary always yields at least one hit. The strict parse (path, name.tid)
+    is used only when its path agrees with the watched paths found by a plain
+    search of the line; otherwise every found path is reported with
+    proc_name=UNKNOWN_PROC and tid=None (flagged), and `miss` says why.
     """
     text = line.rstrip("\r\n")
     head = _HEAD.match(text)
     if head is None or head.group("op") not in RELEVANT_OPS:
-        return None, None
+        return (), None
     rest = head.group("rest")
-    tail = _TAIL.match(rest)
-    if tail is not None:
-        mid = tail.group("mid")
-        found = _PATH.search(mid)
-        if found is None:
-            return None, None
-        path: str | None = found.group(1).rstrip()
-        if not matcher.matches(path):
-            return None, None
-        proc_name, tid, miss = tail.group("proc").strip(), int(tail.group("tid")), None
+    strict = _strict(rest, matcher)
+    loose = _loose_paths(rest, matcher)
+    loose_paths = {p for p, _ in loose}
+    miss: str | None = None
+    if strict is not None and matcher.matches(strict[0]) and loose_paths <= {strict[0]}:
+        path, proc, tid, offset = strict
+        located: tuple[tuple[str, int], ...] = ((path, offset),)
+    elif loose:
+        proc, tid, located = UNKNOWN_PROC, None, loose
+        miss = (
+            "name.tid tail split disagrees with the watched path(s); flagged"
+            if strict is not None else "unparseable name.tid tail; flagged"
+        )
+    elif strict is not None:
+        return (), None  # fully parsed; no watched path on this line
     else:
-        loose = _LOOSE_TAIL.match(rest)
-        mid = loose.group("mid") if loose else rest
-        found = _PATH.search(mid)
-        path = _loose_path(found.group(1), matcher) if found else None
-        if found is None or path is None:
-            return None, "relevant op with unparseable tail and no watched path"
-        proc_name, tid, miss = UNKNOWN_PROC, None, "unparseable name.tid tail; flagged"
+        return (), "relevant op with unparseable tail and no watched path"
     timestamp = _timestamp(head.group("ts"), today, now)
     if timestamp is None:
-        return None, "unparseable timestamp on a watched path"
-    err = _ERRNO.search(mid[: found.start(1)])
-    hit = FsUsageHit(
-        timestamp=timestamp, op=head.group("op"), path=path, proc_name=proc_name, tid=tid,
-        raw=text, errno=int(err.group(1)) if err else None,
-    )
-    return hit, miss
+        timestamp = now.astimezone(timezone.utc)
+        miss = "unparseable timestamp; used read time"
+    hits = []
+    for path, offset in located:
+        err = _ERRNO.search(rest[:offset])
+        hits.append(FsUsageHit(
+            timestamp=timestamp, op=head.group("op"), path=path, proc_name=proc, tid=tid,
+            raw=text, errno=int(err.group(1)) if err else None,
+        ))
+    return tuple(hits), miss
 
 
 def parse_fs_usage_line(
     line: str, matcher: WatchMatcher, today: date, now: datetime
 ) -> FsUsageHit | None:
-    """One fs_usage line -> hit if it is a relevant op on a watched path, else None.
-
-    `now` must be tz-aware local time (fs_usage prints local wall-clock times).
-    """
-    return parse_fs_usage_line_detail(line, matcher, today, now)[0]
+    """First hit of parse_fs_usage_hits, or None. `now` is tz-aware local time."""
+    hits, _ = parse_fs_usage_hits(line, matcher, today, now)
+    return hits[0] if hits else None
 
 
 # --- pid resolution ---------------------------------------------------------------
@@ -347,7 +403,7 @@ class MacFsUsageBackend(Backend):
         tail: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
         done = threading.Event()
         helpers = (
-            threading.Thread(target=_drain_stderr, args=(proc, tail), daemon=True,
+            threading.Thread(target=_drain_stderr, args=(proc, tail, done), daemon=True,
                              name="credwatch-fs_usage-stderr"),
             threading.Thread(target=self._stop_watcher, args=(proc, stop, done), daemon=True,
                              name="credwatch-fs_usage-stop"),
@@ -364,20 +420,20 @@ class MacFsUsageBackend(Backend):
                 if not self._prefiltered(line):
                     continue
                 now = self._now()
-                hit, miss = parse_fs_usage_line_detail(line, self._matcher, now.date(), now)
+                hits, miss = parse_fs_usage_hits(line, self._matcher, now.date(), now)
                 if miss is not None:
                     self._note_miss(miss, line)
-                if hit is None:
-                    continue
-                self._append_export(hit.raw, now.date())
-                yield self._to_event(hit)
+                if hits:
+                    self._append_export(hits[0].raw, now.date())
+                for hit in hits:
+                    yield self._to_event(hit)
             else:
                 eof = not stop.is_set()
         finally:
             done.set()
             _finish(proc, eof)
-            helpers[0].join(1)
             _close_pipes(proc)
+            helpers[0].join(1)
             with self._lock:
                 self._proc = None
         if stop.is_set():
@@ -399,13 +455,16 @@ class MacFsUsageBackend(Backend):
                 return
 
 
-def _drain_stderr(proc: Any, tail: collections.deque[str]) -> None:
+def _drain_stderr(proc: Any, tail: collections.deque[str], done: threading.Event) -> None:
     """Keep stderr flowing (a full pipe would block fs_usage) and remember its tail."""
     try:
         for line in proc.stderr:
             tail.append(line)
     except (OSError, ValueError):
-        logger.warning("could not read fs_usage stderr", exc_info=True)
+        if done.is_set():  # pipe closed during teardown: a normal exit
+            logger.debug("fs_usage stderr closed during teardown")
+        else:
+            logger.warning("could not read fs_usage stderr", exc_info=True)
 
 
 def _close_pipes(proc: Any) -> None:

@@ -44,9 +44,14 @@ parser where the real format differs from these assumptions:
 - long process names arrive truncated to 16 characters (the parser bounds the name to
   16 characters; a longer name makes the line fall back to "process unknown", flagged);
 - `rename`/`renameat` print one path or two (old and new). Rename a watched file and look
-  at the line. If two paths appear, the parser currently reads both as one path, which
-  matches no watched path, so the rename is **missed**. Split the paths in the parser
-  before relying on rename detection;
+  at the line. Two-path lines are handled: credwatch searches the line for every watched
+  path and emits **one flagged event per watched path** (source and/or destination), with
+  the process marked unknown, because the column split cannot be trusted. Check that a
+  real rename produces these events;
+- attacker-chosen process names: a name containing a float or ` W ` can shift the column
+  split. credwatch then cross-checks the parsed path against a plain search for watched
+  paths, and on disagreement reports the watched path as a flagged "process unknown"
+  event. Confirm with a binary named like `a 1.1 b` reading a watched file;
 - control characters in process names: run a process whose name contains a newline or CR
   (`cp /bin/cat "/tmp/a$(printf '\r')b"` and run it on a watched file). Check whether
   fs_usage escapes the character or prints it raw. A raw CR/LF splits the line; credwatch
@@ -138,8 +143,11 @@ Full Disk Access grants, then repeat. Record the actual outcome here.
     Alerts get quieter, but an attacker who can pick a process name can get allowed.
   - Ambiguous names (several live processes) and processes that have already exited
     always leave `exe` unknown. The candidate pids are recorded in `raw`.
-- **Unparseable lines fail closed.** A watched-path access whose `name.tid` tail cannot be
-  parsed is still recorded, as "process unknown", and flagged. A rate-limited WARNING
+- **Unparseable lines fail closed.** A relevant-op line that contains a watched path at a
+  path boundary always produces an event. If its `name.tid` tail cannot be parsed, or the
+  parsed path disagrees with the watched paths found in the line, the event is recorded
+  as "process unknown" and flagged. A path holding two consecutive spaces under a watched
+  directory is reported only up to the double space. A rate-limited WARNING
   `fs_usage parse miss` is logged.
 - **No inode/dev.** fs_usage reports no inode, so the correlator verifies by lexical path
   (canonicalised with `realpath`) only, which is weaker than the Linux inode check.
