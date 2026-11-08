@@ -332,6 +332,21 @@ def test_run_mailer_factory_loads_credentials_lazily(run_env, monkeypatch):
     store.close()
 
 
+def test_run_watch_list_option_overrides_default_file(run_env, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(cli, "get_backend", lambda c, w, r: seen.append(tuple(w)) or FakeBackend())
+    custom = tmp_path / "custom-watch.txt"
+    custom.write_text("/only/this\n")
+    assert cli.main([*run_env["argv"], "run", "--watch-list", str(custom)]) == 0
+    assert seen == [(Path("/only/this"),)]
+
+
+def test_run_watch_list_option_is_hidden_from_help(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+    assert "--watch-list" not in capsys.readouterr().out
+
+
 def test_run_startup_failure_returns_nonzero(run_env, monkeypatch, capsys):
     def boom(c, w, r):
         raise BackendError("no backend here")

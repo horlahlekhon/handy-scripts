@@ -176,7 +176,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     logging_setup.configure(
         config.data_dir / "logs", logging.DEBUG if args.verbose else logging.INFO
     )
-    watch_paths = read_watch_list(WATCH_LIST_PATH)
+    watch_paths = read_watch_list(Path(args.watch_list) if args.watch_list else WATCH_LIST_PATH)
     secrets = _secrets_file(args)
     store = Store(config.data_dir / "events.db")
     try:
@@ -537,7 +537,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("run", help="run the monitoring daemon (root)").set_defaults(func=cmd_run)
+    run = sub.add_parser("run", help="run the monitoring daemon (root)")
+    # Test-only (tests/test_e2e_linux.py): read the watch list from PATH instead of
+    # /etc/credwatch/watched_paths.txt. Hidden from --help on purpose.
+    run.add_argument("--watch-list", metavar="PATH", help=argparse.SUPPRESS)
+    run.set_defaults(func=cmd_run)
 
     status = sub.add_parser("status", help="show daemon health (root)")
     status.add_argument("--probe", action="store_true", help="read the canary and wait for its event")
