@@ -166,7 +166,10 @@ def ev(path="/home/u/.ssh/id_rsa", pid=42, inode=None, dev=None):
     )
 
 
-def make(allow, snaps=None, *, stat_fn=None, realpath_fn=lambda p: p):
+CANARY_ID = (7, 8)
+
+
+def make(allow, snaps=None, *, stat_fn=None, realpath_fn=lambda p: p, identity=CANARY_ID):
     calls = [] if snaps is None else snaps
 
     def snap(pid, now):
@@ -175,7 +178,7 @@ def make(allow, snaps=None, *, stat_fn=None, realpath_fn=lambda p: p):
 
     c = Correlator(allow, self_pid=999, canary_path=CANARY, snapshot=snap, clock=lambda: NOW,
                    stat_fn=stat_fn or (lambda p: SimpleNamespace(st_ino=1, st_dev=2)),
-                   realpath_fn=realpath_fn)
+                   realpath_fn=realpath_fn, canary_identity_fn=lambda p: identity)
     return c, calls
 
 
@@ -195,27 +198,76 @@ def test_flagged_event_gets_snapshot():
 def test_canary_self_read_is_exempt():
     a = StubAllowlist(Verdict(False, None))
     c, calls = make(a)
-    pe = c.process(ev(path="/home/u/./x/../.credwatch-canary", pid=999))
+    pe = c.process(ev(path=CANARY, pid=999, inode=7, dev=8))
     assert pe.verdict == Verdict(True, "credwatch-canary")
     assert pe.snapshot is None and calls == [] and a.seen == []
 
 
-def test_canary_read_by_other_pid_is_canary_allowed():
+def test_lexical_canary_path_with_foreign_inode_is_flagged():
+    """/tmp/l/../../../<canary> can open ~/.ssh/id_rsa through a symlink (R51)."""
     a = StubAllowlist(Verdict(False, None))
     c, calls = make(a)
-    pe = c.process(ev(path=CANARY, pid=5))
+    pe = c.process(ev(path="/tmp/l/../../home/u/.credwatch-canary", pid=999, inode=1, dev=2))
+    assert not pe.verdict.allowed and len(calls) == 1
+    pe = c.process(ev(path=CANARY, pid=999, inode=1, dev=2))
+    assert not pe.verdict.allowed
+
+
+def test_canary_inode_match_exempt_any_pid():
+    a = StubAllowlist(Verdict(False, None))
+    c, calls = make(a)
+    pe = c.process(ev(path="/anything/alias", pid=5, inode=7, dev=8))
     assert pe.verdict == Verdict(True, "credwatch-canary")
     assert pe.snapshot is None and calls == [] and a.seen == []
 
 
 def test_status_probe_canary_read_not_flagged():
-    """`credwatch status --probe` reads the canary from another process (R49)."""
+    """`credwatch status --probe` reads the canary from another process (R49/R51)."""
     a = StubAllowlist(Verdict(False, None))
-    c, calls = make(a, realpath_fn=lambda p: CANARY)
-    pe = c.process(ev(path="/proc/self/cwd/alias", pid=31337, inode=1, dev=2))
+    c, calls = make(a)
+    pe = c.process(ev(path=CANARY, pid=31337, inode=7, dev=8))
     assert pe.verdict == Verdict(True, "credwatch-canary")
     assert pe.snapshot is None and calls == [] and a.seen == []
-    assert pe.canonical_path == CANARY
+
+
+def test_macos_canary_requires_stat_identity():
+    a = StubAllowlist(Verdict(False, None))
+    ok = SimpleNamespace(st_ino=7, st_dev=8)
+    c, calls = make(a, realpath_fn=lambda p: CANARY, stat_fn=lambda p: ok)
+    assert c.process(ev(path="/x/alias", pid=5)).verdict == Verdict(True, "credwatch-canary")
+    # canonical path equals canary but stat identity differs: normal checks
+    other = SimpleNamespace(st_ino=1, st_dev=2)
+    c, calls = make(a, realpath_fn=lambda p: CANARY, stat_fn=lambda p: other)
+    assert not c.process(ev(path=CANARY, pid=999)).verdict.allowed
+    # lexical canary path that resolves elsewhere: normal checks even for self_pid
+    c, calls = make(a, realpath_fn=lambda p: "/home/u/.ssh/id_rsa", stat_fn=lambda p: ok)
+    assert not c.process(ev(path=CANARY, pid=999)).verdict.allowed
+
+
+def test_canary_identity_refreshes_after_recreation():
+    ids = iter([(7, 8), (9, 8)])
+    a = StubAllowlist(Verdict(False, None))
+    c = Correlator(a, self_pid=999, canary_path=CANARY, snapshot=lambda p, n: None,
+                   canary_identity_fn=lambda p: next(ids), realpath_fn=lambda p: p)
+    assert c.process(ev(path=CANARY, inode=7, dev=8)).verdict.allowed
+    assert c.process(ev(path=CANARY, inode=9, dev=8)).verdict == Verdict(True, "credwatch-canary")
+
+
+def test_canary_identity_refuses_hardlinked_or_symlinked_canary(tmp_path, caplog):
+    from credwatch.correlate import read_canary_identity
+    f = tmp_path / "canary"
+    f.write_text("x")
+    st = f.stat()
+    assert read_canary_identity(str(f)) == (st.st_ino, st.st_dev)
+    os.link(f, tmp_path / "hard")
+    with caplog.at_level(logging.WARNING):
+        assert read_canary_identity(str(f)) is None
+    assert "single link" in caplog.text
+    (tmp_path / "hard").unlink()
+    sym = tmp_path / "sym"
+    sym.symlink_to(f)
+    assert read_canary_identity(str(sym)) is None
+    assert read_canary_identity(str(tmp_path / "missing")) is None
 
 
 def test_verified_inode_uses_canonical_path_for_allowlist():

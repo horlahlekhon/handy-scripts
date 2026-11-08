@@ -35,7 +35,8 @@ prevent that. It makes it *visible*:
   blind, and a health alert is emailed. `sudo credwatch status --probe` runs the same
   check on demand. The canary holds nothing sensitive, so reads of it (by the daemon or by
   `status --probe`) are recorded as allowed `credwatch-canary` events: visible in reports,
-  never alerted.
+  never alerted. The exemption is by file identity (inode and device, from the kernel on
+  Linux), not by path string, and only while the canary is a regular file with one link.
 - **Heartbeat.** `status` reports a stale or missing daemon heartbeat (older than 180 s).
 - Health alerts are de-duplicated per source (`health`, `canary`, `backend`): an
   identical problem set is not re-sent for 6 hours, and a cleared problem resets its

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat as stat_mod
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -125,6 +126,26 @@ def snapshot_process(pid: int | None, now: datetime, *, psutil_mod: Any = psutil
     return result(True, conns, ancestry, "; ".join(errors) or None)
 
 
+def read_canary_identity(path: str) -> tuple[int, int] | None:
+    """(st_ino, st_dev) of the canary via O_NOFOLLOW + fstat; None unless a lone regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        logger.warning("cannot open canary %s for identity: %s", path, exc.strerror)
+        return None
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        logger.warning("cannot fstat canary %s: %s", path, exc.strerror)
+        return None
+    finally:
+        os.close(fd)
+    if not stat_mod.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        logger.warning("canary %s is not a regular file with a single link; no exemption", path)
+        return None
+    return (st.st_ino, st.st_dev)
+
+
 @dataclass(frozen=True)
 class _Resolution:
     allow_event: FileAccessEvent
@@ -149,6 +170,7 @@ class Correlator:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         stat_fn: Callable[[str], Any] = os.stat,
         realpath_fn: Callable[[str], str] = os.path.realpath,
+        canary_identity_fn: Callable[[str], tuple[int, int] | None] = read_canary_identity,
     ) -> None:
         self._allowlist = allowlist
         self._self_pid = self_pid
@@ -157,15 +179,59 @@ class Correlator:
         self._clock = clock
         self._stat = stat_fn
         self._realpath = realpath_fn
+        self._identity_fn = canary_identity_fn
+        self._identity: tuple[int, int] | None = None
+        self._identity_loaded = False
+
+    def _canary_identity(self, refresh: bool = False) -> tuple[int, int] | None:
+        """Lazily computed; refreshed when a candidate mismatches (canary recreated)."""
+        if refresh or not self._identity_loaded or self._identity is None:
+            self._identity = self._identity_fn(self._canary)
+            self._identity_loaded = True
+        return self._identity
+
+    def _matches_canary(self, ino: int, dev: int, *, refresh_ok: bool) -> bool:
+        identity = self._canary_identity()
+        if identity == (ino, dev):
+            return True
+        if refresh_ok:
+            return self._canary_identity(refresh=True) == (ino, dev)
+        return False
+
+    def _is_canary_event(self, event: FileAccessEvent) -> str | None:
+        """R51: exemption is by file identity only, never by the path string.
+
+        Returns the canonical path (or "" when none was needed) on a match, else None.
+        """
+        if event.inode is not None and event.dev is not None:
+            # (a) Linux: kernel-reported inode/dev, whatever the path says. Refresh only
+            # when the (untrusted) path claims to be the canary, bounding syscalls.
+            claims = os.path.normpath(event.path) == self._canary
+            if self._matches_canary(event.inode, event.dev, refresh_ok=claims):
+                return ""
+            return None
+        if event.inode is None and event.dev is None:
+            # (b) macOS: canonical path must equal the canary AND stat identity must match.
+            # Residual race: the path can be swapped between realpath and stat.
+            canonical = self._canonical(event.path)
+            if canonical is None or os.path.normpath(canonical) != self._canary:
+                return None
+            try:
+                st = self._stat(canonical)
+            except OSError:
+                return None
+            if self._matches_canary(st.st_ino, st.st_dev, refresh_ok=True):
+                return canonical
+        return None
 
     def process(self, event: FileAccessEvent) -> ProcessedEvent:
-        # R49: the canary holds nothing sensitive and reads of it only prove the pipeline
-        # is alive, so any pid (the daemon, or `status --probe`) is allowed, unsnapshotted.
-        if os.path.normpath(event.path) == self._canary:
-            return ProcessedEvent(event, Verdict(True, CANARY_RULE), None)
+        # (c) self_pid adds nothing on its own: only (a)/(b) identity matches exempt.
+        canary = self._is_canary_event(event)
+        if canary is not None:
+            return ProcessedEvent(
+                event, Verdict(True, CANARY_RULE), None, canonical_path=canary or None
+            )
         res = self._resolve(event)
-        if res.canonical is not None and os.path.normpath(res.canonical) == self._canary:
-            return ProcessedEvent(event, Verdict(True, CANARY_RULE), None, canonical_path=res.canonical)
         verdict = self._judge(res)
         snap = None if verdict.allowed else self._safe_snapshot(event.pid)
         return ProcessedEvent(event, verdict, snap, canonical_path=res.canonical)
