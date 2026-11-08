@@ -139,7 +139,9 @@ def resolve_watch_paths(cfg: Config) -> tuple[Path, ...]:
 class WatchMatcher:
     def __init__(self, paths: Iterable[Path], case_insensitive: bool = False) -> None:
         self._fold = case_insensitive
-        normalized = tuple(self._norm(str(p)) for p in paths)
+        lexical = tuple(_lexical(str(p)) for p in paths)
+        self._display = tuple(sorted(set(lexical)))
+        normalized = tuple(self._norm(p) for p in lexical)
         self._exact = frozenset(normalized)
         self._prefixes = tuple(n.rstrip(os.sep) + os.sep for n in normalized)
 
@@ -149,8 +151,12 @@ class WatchMatcher:
         NFC: APFS treats NFC and NFD spellings of a name as the same file, and NFC
         only merges canonically equivalent spellings, so ASCII paths are unaffected.
         """
-        normed = unicodedata.normalize("NFC", os.path.normpath(path))
+        normed = _lexical(path)
         return unicodedata.normalize("NFC", normed.casefold()) if self._fold else normed
+
+    def normalize(self, path: str) -> str:
+        """`path` in the form matches() compares (and normalized_watch_paths() returns)."""
+        return self._norm(path)
 
     def matches(self, path: str) -> bool:
         normed = self._norm(path)
@@ -163,6 +169,14 @@ class WatchMatcher:
     def normalized_watch_paths(self) -> tuple[str, ...]:
         """The watched paths as matches() compares them: normpath'd, NFC, casefolded if insensitive."""
         return tuple(sorted(self._exact))
+
+    def watch_paths(self) -> tuple[str, ...]:
+        """The watched paths normpath'd and NFC'd, original case kept (for reporting)."""
+        return self._display
+
+
+def _lexical(path: str) -> str:
+    return unicodedata.normalize("NFC", os.path.normpath(path))
 
 
 def write_watch_list(paths: Iterable[Path], dest: Path) -> None:

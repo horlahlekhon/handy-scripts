@@ -47,6 +47,7 @@ EXPORT_NAME = "fs_usage-{day}.log"
 _EXPORT_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
 
 UNKNOWN_PROC = "?"
+DOTDOT_MISS = "unresolvable '..' path; attributed to watched path by component name"
 MISS_LOG_INTERVAL_SECONDS = 60
 
 _HEAD = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<op>\S+)\s+(?P<rest>.*)$")
@@ -57,6 +58,7 @@ _TAIL = re.compile(
 )
 _PATH = re.compile(r"(?:^|[\s\]])(/.*)$")  # same path starts as _candidate_starts
 _ERRNO = re.compile(r"\[\s*(\d+)\]")
+_DOTDOT = re.compile(r"/\.\.(?=/|\s|$)")
 
 
 @dataclass(frozen=True)
@@ -75,16 +77,27 @@ def _nfc(text: str) -> str:
     return text if text.isascii() else unicodedata.normalize("NFC", text)
 
 
+def _component_key(watch_path: str, matcher: WatchMatcher) -> str:
+    """Final component of a watched path, in the matcher's comparison form."""
+    return matcher.normalize(watch_path).rsplit("/", 1)[-1]
+
+
 def prefilter_keys(matcher: WatchMatcher) -> frozenset[str]:
     """Final component of every watched path, as the matcher normalizes it.
 
     Any line holding a path that matches a watched path W (after ./, //, ..,
     case and NFC normalization) contains W's last component literally once the
-    line is NFC'd and casefolded: normpath only drops components, never builds
+    line is put through fold_line: normpath only drops components, never builds
     new ones, and '/' blocks Unicode composition. For a watched directory this
     is the directory's own name, so files below it pass too.
     """
-    return frozenset(p.rsplit("/", 1)[-1] for p in matcher.normalized_watch_paths())
+    return frozenset(_component_key(p, matcher) for p in matcher.watch_paths())
+
+
+def fold_line(text: str, matcher: WatchMatcher) -> str:
+    """text in the form prefilter keys are compared against (same as matcher.normalize)."""
+    nfc = _nfc(text)
+    return _nfc(nfc.casefold()) if matcher.case_insensitive else nfc
 
 
 def _timestamp(text: str, today: date, now: datetime) -> datetime | None:
@@ -156,14 +169,30 @@ def _fold_with_offsets(text: str) -> tuple[str, list[int]]:
     return "".join(folded), offsets
 
 
+def _needles(matcher: WatchMatcher) -> tuple[str, ...]:
+    """casefold(NFC(normpath(p))) per watched path, WITHOUT a trailing NFC.
+
+    The haystack is casefold(NFC(line)), built char by char. casefold maps each
+    character independently, so a line holding an NFC spelling of p holds
+    casefold(NFC(p)) at the same place, and the offset map stays exact. (A
+    trailing NFC on the needle alone would miss e.g. U+01F0, which casefolds
+    to a decomposed j + U+030C.)
+    """
+    paths = matcher.watch_paths()
+    return tuple(sorted({p.casefold() for p in paths})) if matcher.case_insensitive else paths
+
+
 def _needle_starts(rest: str, matcher: WatchMatcher) -> list[tuple[int, int]]:
-    """(start, end) in rest of every watched path occurring at a left path boundary."""
+    """(start, end) in rest of every watched path occurring at a left path boundary.
+
+    `rest` is already NFC. Needle and haystack use one form: casefold(NFC(.)).
+    """
     if matcher.case_insensitive:
         haystack, offsets = _fold_with_offsets(rest)
     else:
         haystack, offsets = rest, list(range(len(rest) + 1))
     found = []
-    for needle in matcher.normalized_watch_paths():
+    for needle in _needles(matcher):
         k = haystack.find(needle)
         while k != -1:
             j = k + len(needle)
@@ -218,16 +247,59 @@ def _strict(rest: str) -> tuple[str, str, int, int] | None:
     return found.group(1).rstrip(), tail.group("proc").strip(), int(tail.group("tid")), found.start(1)
 
 
+def _original_name(raw: str) -> tuple[str, int] | None:
+    """(proc_name, tid) as printed in the ORIGINAL (un-normalized) line."""
+    head = _HEAD.match(raw)
+    tail = _TAIL.match(head.group("rest")) if head is not None else None
+    return (tail.group("proc").strip(), int(tail.group("tid"))) if tail is not None else None
+
+
+def _dotdot_fallback(rest: str, matcher: WatchMatcher) -> tuple[tuple[str, int], ...]:
+    """Fail closed on a `..` neither search could resolve (e.g. `/x  y/../.netrc`).
+
+    Each watched path whose final component occurs in the line is reported as
+    itself (offset: the line's first '/', for the errno lookup).
+    """
+    if _DOTDOT.search(rest) is None:
+        return ()
+    folded, first = fold_line(rest, matcher), rest.find("/")
+    return tuple(
+        (p, first) for p in matcher.watch_paths() if _component_key(p, matcher) in folded
+    )
+
+
+def _attribution(
+    rest: str, raw: str, loose: tuple[tuple[str, int], ...], matcher: WatchMatcher
+) -> tuple[str, int | None, str | None]:
+    """(proc_name, tid, miss): the strict name.tid only if it provably names `loose`."""
+    strict = _strict(rest)
+    if strict is None:
+        return UNKNOWN_PROC, None, "unparseable name.tid tail; flagged"
+    path, proc, tid, offset = strict
+    agrees = (
+        len(loose) == 1 and loose[0][1] == offset
+        and _watched(path, matcher) and _normalize(path) == loose[0][0]
+    )
+    if not agrees:
+        return UNKNOWN_PROC, None, "name.tid tail split disagrees with the watched path(s); flagged"
+    original = _original_name(raw)
+    if original is None or original[1] != tid or _nfc(original[0]) != proc:
+        return UNKNOWN_PROC, None, "name.tid tail differs in the original line; flagged"
+    return original[0], tid, None
+
+
 def parse_fs_usage_hits(
     line: str, matcher: WatchMatcher, today: date, now: datetime
 ) -> tuple[tuple[FsUsageHit, ...], str | None]:
     """(hits, miss) for one fs_usage line; one hit per distinct watched path.
 
     Invariant: ((), None) only when no candidate path and no watched-path
-    needle in the line is watched. The strict parse (path, name.tid) is used
-    only when its path is watched AND is exactly the single watched path the
-    loose search found at the same place; otherwise every found path is
-    reported with proc_name=UNKNOWN_PROC, tid=None (flagged), and `miss` says why.
+    needle in the line is watched, and (if the line has a `/..` segment) no
+    watched path's final component occurs in it. The strict parse (path,
+    name.tid) is used only when its path is watched AND is exactly the single
+    watched path the loose search found at the same place; otherwise every
+    found path is reported with proc_name=UNKNOWN_PROC, tid=None (flagged),
+    and `miss` says why. proc_name is spelled as in the original line.
     """
     raw = line.rstrip("\r\n")  # original spelling, kept as evidence
     text = _nfc(raw)  # paths are matched and reported in NFC form
@@ -235,23 +307,14 @@ def parse_fs_usage_hits(
     if head is None or head.group("op") not in RELEVANT_OPS:
         return (), None
     rest = head.group("rest")
-    strict = _strict(rest)
     loose = _loose_paths(rest, matcher)
-    if not loose:
-        return (), None  # no watched path anywhere in the line
-    miss: str | None = None
-    agrees = (
-        strict is not None and len(loose) == 1 and loose[0][1] == strict[3]
-        and _watched(strict[0], matcher) and _normalize(strict[0]) == loose[0][0]
-    )
-    if agrees:
-        _, proc, tid, _ = strict
+    if loose:
+        proc, tid, miss = _attribution(rest, raw, loose, matcher)
     else:
-        proc, tid = UNKNOWN_PROC, None
-        miss = (
-            "name.tid tail split disagrees with the watched path(s); flagged"
-            if strict is not None else "unparseable name.tid tail; flagged"
-        )
+        loose = _dotdot_fallback(rest, matcher)
+        if not loose:
+            return (), None  # no watched path anywhere in the line
+        proc, tid, miss = UNKNOWN_PROC, None, DOTDOT_MISS
     timestamp = _timestamp(head.group("ts"), today, now)
     if timestamp is None:
         timestamp = now.astimezone(timezone.utc)
@@ -278,8 +341,11 @@ def parse_fs_usage_line(
 
 
 def _name_matches(reported: str, actual: str | None) -> bool:
+    """Compared in NFC on both sides: canonically equivalent spellings all match,
+    so they surface as several candidates rather than one false unique match."""
     if not actual:
         return False
+    reported, actual = _nfc(reported), _nfc(actual)
     if actual == reported:
         return True
     return len(reported) >= MAXCOMLEN - 1 and actual.startswith(reported)
@@ -424,7 +490,7 @@ class MacFsUsageBackend(Backend):
         Must never reject a line the parser would report (see prefilter_keys);
         false positives only cost a full parse.
         """
-        folded = _nfc(_nfc(line).casefold())
+        folded = fold_line(line, self._matcher)
         return any(k in folded for k in self._prefilter)
 
     def _note_miss(self, reason: str, line: str) -> None:

@@ -21,6 +21,7 @@ from credwatch.backends.macos_fsusage import (
     STALE_OUTPUT_SECONDS,
     MISS_LOG_INTERVAL_SECONDS,
     RELEVANT_OPS,
+    UNKNOWN_PROC,
     FsUsageHit,
     MacFsUsageBackend,
     parse_fs_usage_line,
@@ -296,10 +297,15 @@ def _variant(rng, path):
             out.append(".")
         if rng.random() < 0.1:
             out.extend(("bob", ".."))
+        if rng.random() < 0.1:  # whitespace in a component that `..` removes
+            out.extend((rng.choice(_WS_COMPONENTS), ".."))
         cased = "".join(c.upper() if rng.random() < 0.3 else c for c in part)
         out.append(unicodedata.normalize("NFD", cased) if rng.random() < 0.3 else cased)
     sep = lambda: "//" if rng.random() < 0.15 else "/"  # noqa: E731
     return "".join(sep() + p for p in out)
+
+
+_WS_COMPONENTS = ("x  y", "x ", "a\tb", "  ", " z", "q\t", " ")
 
 
 def _key(path):
@@ -325,13 +331,35 @@ def _random_lines(seed, count=500):
         yield line, target
 
 
+def _under(key, root):
+    return key == root or key.startswith(root + "/")
+
+
+def _covered(target, reported):
+    """Invariant check over (path, proc) pairs reported for one line.
+
+    The target itself is reported, or (an unresolvable `..` or a whitespace
+    component split it) a flagged UNKNOWN_PROC hit names a path in the same
+    watched root. An attributed hit must be exactly the target.
+    """
+    t = _key(target)
+    roots = [r for r in (_key(str(w)) for w in WATCHED) if _under(t, r)]
+    for path, proc in reported:
+        if proc != UNKNOWN_PROC and _key(path) != t:
+            return False
+    return any(
+        _key(path) == t or (proc == UNKNOWN_PROC and any(_under(_key(path), r) for r in roots))
+        for path, proc in reported
+    )
+
+
 @pytest.mark.parametrize("seed", range(5))
 def test_random_attacker_names_never_hide_watched_path(matcher, seed):
     for line, target in _random_lines(seed):
         hits, _ = _hits(line, matcher)
         assert hits, line
         assert all(matcher.matches(h.path) for h in hits), line
-        assert _key(target) in {_key(h.path) for h in hits}, line
+        assert _covered(target, [(h.path, h.proc_name) for h in hits]), line
         assert all(h.raw == line for h in hits), line
 
 
@@ -844,12 +872,12 @@ def test_random_attacker_names_never_hidden_by_backend_prefilter(tmp_path, match
     """Same generator, pushed through the real stream: prefilter + parse + events."""
     pairs = list(_random_lines(seed))
     events = _drain(_backend(tmp_path, FakePopen([line for line, _ in pairs])))
-    by_line = collections.defaultdict(set)
+    by_line = collections.defaultdict(list)
     for ev in events:
-        by_line[ev.raw.split("\n")[0]].add(_key(ev.path))
+        by_line[ev.raw.split("\n")[0]].append((ev.path, ev.comm or UNKNOWN_PROC))
         assert matcher.matches(ev.path), ev.raw
     for line, target in pairs:
-        assert _key(target) in by_line[line], line
+        assert _covered(target, by_line[line]), line
 
 
 # --- fix round 4: prefilter keys, NFC, `]` path start, single-space ambiguity ----------
@@ -932,3 +960,95 @@ def test_single_space_before_elapsed_is_ambiguous_under_watched_dir(matcher):
     hits, miss = _hits(two, matcher)
     assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.ssh/id", "?")]
     assert "disagrees" in miss
+
+
+# --- fix round 5: unresolvable `..`, one needle normalization, NFC name matching ----------
+
+
+_NETRCS = {"/Users/alice/.netrc", JOSE_NETRC}  # both watched paths end in `.netrc`
+
+
+@pytest.mark.parametrize("printed,expected", [
+    ("/Users/alice/x  y/../.netrc", _NETRCS),
+    ("/Users/alice/x /../.netrc", _NETRCS),
+    ("/Users/alice/a\tb/../.ssh/id", {"/Users/alice/.ssh"}),
+    ("/Users/bob/  /../../alice/.netrc", _NETRCS),
+])
+def test_whitespace_component_removed_by_dotdot_fails_closed(tmp_path, caplog, printed, expected):
+    line = f"23:59:58.100000  open  F=3  (R_____)  {printed}{_TAIL_OK}"
+    hits, miss = _hits(line, WatchMatcher(WATCHED, case_insensitive=True))
+    assert {h.path for h in hits} == expected
+    assert all((h.proc_name, h.tid) == (UNKNOWN_PROC, None) for h in hits)
+    assert miss == "unresolvable '..' path; attributed to watched path by component name"
+    events = _drain(_backend(tmp_path, FakePopen([line])))
+    assert {ev.path for ev in events} == expected
+    assert all((ev.pid, ev.exe, ev.comm) == (None, None, None) for ev in events)
+    assert all(ev.raw.split("\n")[0] == line for ev in events)
+    assert "unresolvable '..' path" in caplog.text
+
+
+def test_dotdot_fallback_keeps_watched_path_spelling():
+    m = WatchMatcher([Path("/Users/Alice/.NetRC")], case_insensitive=True)
+    line = f"23:59:58.100000  unlink  /Users/alice/x  y/../.netrc{_TAIL_OK}"
+    hits, _ = _hits(line, m)
+    assert [(h.path, h.op) for h in hits] == [("/Users/Alice/.NetRC", "unlink")]
+
+
+def test_dotdot_without_watched_component_is_ignored(matcher):
+    line = f"23:59:58.100000  open  F=3  (R_____)  /Users/alice/x  y/../notes.txt{_TAIL_OK}"
+    assert _hits(line, matcher) == ((), None)
+
+
+def test_dotdot_fallback_only_when_nothing_else_found(matcher):
+    line = f"23:59:58.100000  open  F=3  (R_____)  /Users/alice/x/../.netrc{_TAIL_OK}"
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.netrc", "cat")]
+    assert miss is None
+
+
+_JCARON = "/Users/ǰane/.netrc"  # U+01F0: casefolds to j + U+030C (decomposed)
+
+
+@pytest.mark.parametrize("printed", [
+    _JCARON,
+    unicodedata.normalize("NFD", _JCARON),
+    "/USERS/J̌ANE/.NETRC",  # no precomposed capital: stays decomposed under NFC
+])
+def test_needle_search_finds_jcaron_in_glued_layout(printed):
+    m = WatchMatcher([Path(_JCARON)], case_insensitive=True)
+    line = f"23:59:58.100000  open  F=3  (R_____){printed}{_TAIL_OK}"
+    hits, _ = _hits(line, m)
+    assert [(h.path, h.proc_name) for h in hits] == [
+        (unicodedata.normalize("NFC", printed), UNKNOWN_PROC)
+    ]
+
+
+_CAFE_NFC = unicodedata.normalize("NFC", "café")
+_CAFE_NFD = unicodedata.normalize("NFD", "café")
+
+
+def test_resolve_pid_canonically_equivalent_names_are_ambiguous():
+    mod = FakePsutil([FakeProc(10, _CAFE_NFC), FakeProc(11, _CAFE_NFD)])
+    assert resolve_pid(_CAFE_NFC, None, psutil_mod=mod) == (None, (10, 11))
+    assert resolve_pid(_CAFE_NFD, None, psutil_mod=mod) == (None, (10, 11))
+
+
+def test_resolve_pid_nfd_reported_name_matches_nfc_process():
+    mod = FakePsutil([FakeProc(10, _CAFE_NFC)])
+    assert resolve_pid(_CAFE_NFD, None, psutil_mod=mod) == (10, (10,))
+    assert resolve_pid(_CAFE_NFD, 10, psutil_mod=mod) == (10, (10,))
+
+
+def test_proc_name_taken_from_original_line(matcher):
+    line = f"23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   {_CAFE_NFD}.42"
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.netrc", _CAFE_NFD, 42)]
+    assert miss is None
+
+
+def test_backend_resolves_original_name_against_both_spellings(tmp_path):
+    line = f"23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   {_CAFE_NFD}.42"
+    mod = FakePsutil([FakeProc(10, _CAFE_NFC), FakeProc(11, _CAFE_NFD)])
+    (ev,) = _drain(_backend(tmp_path, FakePopen([line]), mod=mod))
+    assert (ev.pid, ev.exe, ev.comm) == (None, None, _CAFE_NFD)
+    assert "pid candidates: 10, 11" in ev.raw

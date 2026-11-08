@@ -23,7 +23,9 @@ The fs_usage backend is a stop-gap and much weaker than the Linux auditd backend
   matches a watched path after lexical normalisation: `./` and `x/..` segments and
   repeated slashes are removed (`os.path.normpath`, plus a leading `//`), the text is
   Unicode-normalised to NFC (APFS treats NFC and NFD spellings as one name), and case is
-  ignored. Nothing is resolved on disk at this stage.
+  ignored. Nothing is resolved on disk at this stage. A `..` that cannot be resolved
+  lexically (see "Unparseable lines fail closed") is reported against the watched path
+  by component name, flagged.
 - **Aliases are not detected.** Relative-path opens (`cd ~/.aws && cat credentials`, if
   fs_usage prints the relative name), symlink aliases (`ln -s ~/.aws/credentials /tmp/x`)
   and hard links (`ln ~/.aws/credentials /tmp/x; cat /tmp/x`) all read the secret under a
@@ -173,24 +175,42 @@ Full Disk Access grants, then repeat. Record the actual outcome here.
     Alerts get quieter, but an attacker who can pick a process name can get allowed.
   - Ambiguous names (several live processes) and processes that have already exited
     always leave `exe` unknown. The candidate pids are recorded in `raw`.
+  - Names are compared in NFC on both sides, using the name as fs_usage printed it. Two
+    processes whose names are canonically equivalent (`café` in NFC and in NFD) are both
+    candidates, so the lookup is ambiguous rather than a false unique match.
 - **Prefilter.** fs_usage output is high-volume, so the daemon first drops every line
   that does not contain, after NFC and case-folding, the final component of some watched
   path (`.netrc`, `credentials`, `.ssh`, ...; for a watched directory its own name). Any
   spelling the parser below accepts (`./`, `//`, `x/..`, case, NFD) still contains that
-  component, so the prefilter never drops a line the parser would report. Common names
-  such as `config` let many unrelated lines through to the full parse; that costs CPU,
-  not correctness (see "Backpressure").
+  component, and the `..` fallback below keys on exactly those components, so the
+  prefilter never drops a line the parser would report (tested by pushing randomized
+  lines through the daemon's stream). Common names such as `config` let many unrelated
+  lines through to the full parse; that costs CPU, not correctness (see "Backpressure").
 - **Unparseable lines fail closed.** For a relevant op (open, rename, unlink, ...),
   credwatch NFC-normalises the line and searches it twice: for every `/`-starting path (at
   the start, after whitespace, or after `]`), normalised (`./`, `//`, `x/..`) and
-  case-folded, and for every watched path as a substring (case-folded with an offset map,
-  so non-ASCII names cannot misalign it). Any watched path found produces an event; the
-  line is ignored only when neither search finds one. The process name and tid are
-  trusted only when the strict column parse yields exactly that watched path; otherwise
-  the event is "process unknown" and flagged, and a rate-limited WARNING
-  `fs_usage parse miss` is logged. Limits:
+  case-folded, and for every watched path as a substring. The substring search compares
+  one form on both sides, `casefold(NFC(...))`, with an offset map back to the line, so
+  non-ASCII names cannot misalign it and characters such as `ǰ` (which casefold to a
+  decomposed sequence) are found. Any watched path found produces an event. If neither
+  search finds one but the line has a `/..` segment (for example `/Users/alice/x  y/../.netrc`,
+  where whitespace inside the component that `..` removes breaks both searches), every
+  watched path whose final component occurs in the line is reported **as the watched path
+  itself**, flagged, with the miss reason `unresolvable '..' path; attributed to watched
+  path by component name`. Otherwise the line is ignored. The process name and tid are
+  trusted only when the strict column parse yields exactly that watched path and the
+  original (un-normalised) line gives the same name.tid; otherwise the event is "process
+  unknown" and flagged, and a rate-limited WARNING `fs_usage parse miss` is logged. The
+  process name is kept as printed (not NFC'd). Limits:
   - a path printed in a form neither search recognises (relative, or glued to a preceding
-    path character) is still missed. See "Known gaps";
+    path character) is missed, unless the line also has a `/..` segment and so takes the
+    fallback. See "Known gaps";
+  - the `..` fallback is by component name, so it over-reports: `/opt/x/../config`
+    gives flagged events for every watched path named `config`, and the reported path is
+    the watched path (for a watched directory, the directory), not the file opened;
+  - if the whitespace component sits *below* a watched directory
+    (`~/.ssh/x  y/../id`), the first search already finds `~/.ssh/x`; that flagged event
+    names the right watched directory but the wrong file, and the fallback does not run;
   - a path under a watched directory that holds two consecutive spaces is reported only
     up to the double space;
   - **single-space ambiguity.** The cross-check extends a path across single spaces
