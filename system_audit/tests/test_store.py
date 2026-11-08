@@ -303,3 +303,12 @@ def test_relative_db_path_rejected():
     from pathlib import Path
     with pytest.raises(StoreError):
         Store(Path("rel/e.db"))
+
+
+def test_canonical_path_round_trips(store):
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    pe = make_pe(ts)
+    store.record(ProcessedEvent(pe.event, pe.verdict, None, canonical_path="/real/id_rsa"))
+    store.record(pe)
+    rows = store.events_since(ts)
+    assert [r.canonical_path for r in rows] == ["/real/id_rsa", None]

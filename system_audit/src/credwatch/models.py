@@ -57,3 +57,4 @@ class ProcessedEvent:
     event: FileAccessEvent
     verdict: Verdict
     snapshot: NetworkSnapshot | None
+    canonical_path: str | None = None
