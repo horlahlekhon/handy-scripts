@@ -6,12 +6,21 @@ import math
 import os
 import posixpath
 import re
-from collections.abc import Mapping
+import subprocess
+import tempfile
+import threading
+import time
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MappingProxyType
 
+from credwatch.backends.base import Backend, BackendError
 from credwatch.models import FileAccessEvent
+from credwatch.paths import has_control_chars
+from credwatch.proc import Runner
+from credwatch.tail import follow
 
 logger = logging.getLogger(__name__)
 
@@ -162,3 +171,165 @@ class AuditAssembler:
         except (ValueError, OverflowError, OSError):
             logger.warning("dropping audit group serial=%s: build failed", serial, exc_info=True)
             return []
+
+
+# ---------------------------------------------------------------------------
+# Rules management
+# ---------------------------------------------------------------------------
+
+DEFAULT_RULES_FILE = Path("/etc/audit/rules.d/credwatch.rules")
+RULES_FILE_MODE = 0o640
+TICK_INTERVAL = 0.5
+_ENABLED = re.compile(r"^enabled\s+(\d+)", re.MULTILINE)
+_NO_MATCHES = "<no matches>"
+_CHECKPOINT_ERRORS = frozenset({10, 11, 12})
+
+
+@dataclass(frozen=True)
+class RenderedRules:
+    text: str
+    skipped: tuple[Path, ...]
+
+
+def _is_ruleable(path: Path) -> bool:
+    text = str(path)
+    return not has_control_chars(text) and not any(c.isspace() for c in text)
+
+
+def render_rules(paths: Iterable[Path], key: str = "credwatch") -> RenderedRules:
+    lines = ["# Managed by credwatch; do not edit."]
+    skipped: list[Path] = []
+    for path in paths:
+        if not _is_ruleable(path):
+            logger.warning("skipping unwatchable path (whitespace/control chars): %r", str(path))
+            skipped.append(path)
+            continue
+        lines.append(f"-w {path} -p rwa -k {key}")
+    return RenderedRules("\n".join(lines) + "\n", tuple(skipped))
+
+
+def _write_atomic(target: Path, content: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), RULES_FILE_MODE)
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def install_rules(
+    paths: Iterable[Path],
+    rules_file: Path = DEFAULT_RULES_FILE,
+    *,
+    runner: Runner,
+    key: str = "credwatch",
+) -> bool:
+    """Write the rules file if its content differs and load it. Returns True if changed."""
+    text = render_rules(paths, key).text
+    try:
+        current = rules_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = None
+    if current == text:
+        return False
+    status = runner.run(["auditctl", "-s"])
+    match = _ENABLED.search(status.stdout or "")
+    if match and match.group(1) == "2":
+        raise BackendError("audit rules are immutable (-e 2); reboot required to load credwatch rules")
+    _write_atomic(rules_file, text)
+    result = runner.run(["augenrules", "--load"])
+    if result.returncode != 0:
+        raise BackendError(f"augenrules --load failed: {(result.stderr or '').strip()}")
+    return True
+
+
+def ensure_auditd(runner: Runner) -> None:
+    result = runner.run(["systemctl", "enable", "--now", "auditd"])
+    if result.returncode != 0:
+        raise BackendError(f"could not enable auditd: {(result.stderr or '').strip()}")
+
+
+def count_loaded_rules(runner: Runner, key: str = "credwatch") -> int:
+    result = runner.run(["auditctl", "-l"])
+    if result.returncode != 0:
+        raise BackendError(f"auditctl -l failed: {(result.stderr or '').strip()}")
+    pattern = re.compile(rf"(?:-k\s+|key=){re.escape(key)}(?:\s|$)")
+    return sum(1 for line in (result.stdout or "").splitlines() if pattern.search(line))
+
+
+class LinuxAuditBackend(Backend):
+    name = BACKEND_NAME
+
+    def __init__(
+        self,
+        audit_log: Path,
+        expected_rule_count: int,
+        runner: Runner,
+        export_checkpoint: Path,
+        key: str = "credwatch",
+        flush_after: float = 2.0,
+    ) -> None:
+        self._flush_after = flush_after
+        self._audit_log = audit_log
+        self._expected = expected_rule_count
+        self._runner = runner
+        self._checkpoint = export_checkpoint
+        self._key = key
+
+    def events(self, stop: threading.Event) -> Iterator[FileAccessEvent]:
+        """Tail the audit log; follow() yields "" on idle polls, which tick the assembler."""
+        assembler = AuditAssembler(self._key, self._flush_after)
+        last_tick = time.monotonic()
+        for line in follow(self._audit_log, stop):
+            now = time.monotonic()
+            if line:
+                yield from assembler.feed(line, now)
+                last_tick = now
+            elif now - last_tick >= TICK_INTERVAL:
+                yield from assembler.feed("", now)
+                last_tick = now
+
+    def health(self) -> tuple[str, ...]:
+        try:
+            loaded = count_loaded_rules(self._runner, self._key)
+        except BackendError as exc:
+            return (str(exc),)
+        if loaded != self._expected:
+            return (f"loaded credwatch audit rules: {loaded}, expected {self._expected}",)
+        return ()
+
+    def _ausearch(self, since: str) -> subprocess.CompletedProcess[str]:
+        return self._runner.run(
+            ["ausearch", "-k", self._key, "-i", "--checkpoint", str(self._checkpoint), "-ts", since],
+            timeout=300,
+        )
+
+    def export_native_log(self, dest_dir: Path) -> Path | None:
+        result = self._ausearch("checkpoint" if self._checkpoint.exists() else "today")
+        if result.returncode in _CHECKPOINT_ERRORS:
+            logger.warning(
+                "ausearch checkpoint unusable (rc=%d); retrying from today", result.returncode
+            )
+            result = self._ausearch("today")
+        if result.returncode == 1 and _NO_MATCHES in (result.stdout or "") + (result.stderr or ""):
+            return None
+        if result.returncode != 0:
+            raise BackendError(
+                f"ausearch failed (rc={result.returncode}): {(result.stderr or '').strip()}"
+            )
+        if not (result.stdout or "").strip():
+            return None
+        dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        out = dest_dir / f"ausearch-{datetime.now().strftime('%Y%m%dT%H%M%S')}.txt"
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(result.stdout)
+        return out
