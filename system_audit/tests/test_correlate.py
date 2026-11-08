@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import psutil
@@ -169,7 +169,14 @@ def ev(path="/home/u/.ssh/id_rsa", pid=42, inode=None, dev=None):
 CANARY_ID = (7, 8)
 
 
-def make(allow, snaps=None, *, stat_fn=None, realpath_fn=lambda p: p, identity=CANARY_ID):
+def _stat_of(ident):
+    if ident is None:
+        raise FileNotFoundError("canary")
+    return SimpleNamespace(st_ino=ident[0], st_dev=ident[1])
+
+
+def make(allow, snaps=None, *, stat_fn=None, realpath_fn=lambda p: p, identity=CANARY_ID,
+         canary_stat=CANARY_ID):
     calls = [] if snaps is None else snaps
 
     def snap(pid, now):
@@ -178,7 +185,8 @@ def make(allow, snaps=None, *, stat_fn=None, realpath_fn=lambda p: p, identity=C
 
     c = Correlator(allow, self_pid=999, canary_path=CANARY, snapshot=snap, clock=lambda: NOW,
                    stat_fn=stat_fn or (lambda p: SimpleNamespace(st_ino=1, st_dev=2)),
-                   realpath_fn=realpath_fn, canary_identity_fn=lambda p: identity)
+                   realpath_fn=realpath_fn, canary_identity_fn=lambda p: identity,
+                   canary_stat_fn=lambda p: _stat_of(canary_stat))
     return c, calls
 
 
@@ -244,30 +252,91 @@ def test_macos_canary_requires_stat_identity():
     assert not c.process(ev(path=CANARY, pid=999)).verdict.allowed
 
 
-def test_canary_identity_refreshes_after_recreation():
-    ids = iter([(7, 8), (9, 8)])
+def test_identity_pinned_not_refreshed_by_events():
+    calls = []
+
+    def identity(p):
+        calls.append(p)
+        return (7, 8)
+
     a = StubAllowlist(Verdict(False, None))
     c = Correlator(a, self_pid=999, canary_path=CANARY, snapshot=lambda p, n: None,
-                   canary_identity_fn=lambda p: next(ids), realpath_fn=lambda p: p)
+                   canary_identity_fn=identity, canary_stat_fn=lambda p: _stat_of((7, 8)),
+                   realpath_fn=lambda p: p)
+    assert not c.process(ev(path=CANARY, inode=9, dev=8)).verdict.allowed  # claims canary
     assert c.process(ev(path=CANARY, inode=7, dev=8)).verdict.allowed
-    assert c.process(ev(path=CANARY, inode=9, dev=8)).verdict == Verdict(True, "credwatch-canary")
+    assert len(calls) == 1
+
+
+def test_inode_reuse_after_canary_deleted_not_exempt():
+    a = StubAllowlist(Verdict(False, None))
+    c, calls = make(a, canary_stat=None)  # canary gone
+    pe = c.process(ev(path="/tmp/reused", inode=7, dev=8))
+    assert not pe.verdict.allowed and len(calls) == 1
+    assert c.canary_problem == "canary file replaced or missing; re-run credwatch install"
+    c, _ = make(a, canary_stat=(99, 8))  # replaced by another file
+    assert not c.process(ev(path=CANARY, inode=7, dev=8)).verdict.allowed
+    assert c.canary_problem is not None
+
+
+def test_missing_canary_retry_rate_limited(caplog):
+    now = [NOW]
+    ids, reads = [None, None, (7, 8)], []
+
+    def identity(p):
+        reads.append(1)
+        return ids[len(reads) - 1]
+
+    a = StubAllowlist(Verdict(False, None))
+    c = Correlator(a, self_pid=999, canary_path=CANARY, snapshot=lambda p, n: None,
+                   clock=lambda: now[0], canary_identity_fn=identity,
+                   canary_stat_fn=lambda p: _stat_of((7, 8)), realpath_fn=lambda p: p)
+    canary_ev = ev(path=CANARY, inode=7, dev=8)
+    for _ in range(5):
+        assert not c.process(canary_ev).verdict.allowed
+    assert len(reads) == 1  # startup read only; no per-event retries
+    now[0] = NOW + timedelta(seconds=61)
+    assert not c.process(canary_ev).verdict.allowed
+    for _ in range(5):
+        c.process(canary_ev)
+    assert len(reads) == 2
+    now[0] = NOW + timedelta(seconds=130)
+    assert c.process(canary_ev).verdict.allowed and len(reads) == 3
+
+
+def test_canary_fifo_or_wrong_owner_or_content_refused(tmp_path, caplog):
+    from credwatch.correlate import read_canary_identity
+    from credwatch.installer.common import CANARY_BODY
+    f = tmp_path / "canary"
+    f.write_text(CANARY_BODY)
+    uid = f.stat().st_uid
+    assert read_canary_identity(str(f), uid) is not None
+    assert read_canary_identity(str(f), uid + 1) is None  # wrong owner
+    g = tmp_path / "edited"
+    g.write_text(CANARY_BODY + "x")
+    assert read_canary_identity(str(g), uid) is None  # wrong content
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    assert read_canary_identity(str(fifo), uid) is None  # must not hang
 
 
 def test_canary_identity_refuses_hardlinked_or_symlinked_canary(tmp_path, caplog):
     from credwatch.correlate import read_canary_identity
+    from credwatch.installer.common import CANARY_BODY
     f = tmp_path / "canary"
-    f.write_text("x")
+    f.write_text(CANARY_BODY)
     st = f.stat()
-    assert read_canary_identity(str(f)) == (st.st_ino, st.st_dev)
+    uid = st.st_uid
+    assert read_canary_identity(str(f), uid) == (st.st_ino, st.st_dev)
     os.link(f, tmp_path / "hard")
     with caplog.at_level(logging.WARNING):
-        assert read_canary_identity(str(f)) is None
+        assert read_canary_identity(str(f), uid) is None
     assert "single link" in caplog.text
     (tmp_path / "hard").unlink()
     sym = tmp_path / "sym"
     sym.symlink_to(f)
-    assert read_canary_identity(str(sym)) is None
-    assert read_canary_identity(str(tmp_path / "missing")) is None
+    assert read_canary_identity(str(sym), uid) is None
+    assert read_canary_identity(str(tmp_path / "missing"), uid) is None
 
 
 def test_verified_inode_uses_canonical_path_for_allowlist():

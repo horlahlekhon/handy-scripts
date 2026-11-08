@@ -27,6 +27,7 @@ from credwatch.alert import (
 from credwatch.backends import get_backend
 from credwatch.backends.base import Backend, BackendError
 from credwatch.capture import PCAP_GLOB, CaptureSupervisor, list_captures
+from credwatch.correlate import CANARY_RULE
 from credwatch.config import Config, ConfigError, load_config
 from credwatch.daemon import (
     META_ALERT_ERROR,
@@ -258,8 +259,9 @@ def _health_state_lines(raw: str | None) -> list[str]:
         return ["  (unreadable)"]
 
 
-def _matches_canary(row: EventRow, canary: str) -> bool:
-    return any(p is not None and os.path.normpath(p) == canary for p in (row.path, row.canonical_path))
+def _matches_canary(row: EventRow) -> bool:
+    """Only the correlator's identity-verified verdict counts, never a path string."""
+    return row.allowed and row.matched_rule == CANARY_RULE
 
 
 def _probe(store: Store, canary: Path) -> bool:
@@ -273,10 +275,9 @@ def _probe(store: Store, canary: Path) -> bool:
     except OSError as exc:
         print(f"probe: cannot read canary {canary}: {_safe(exc.strerror)}")
         return False
-    target = os.path.normpath(str(canary))
     deadline = time.monotonic() + PROBE_TIMEOUT_SECONDS
     while True:
-        if any(_matches_canary(r, target) for r in store.events_since(started)):
+        if any(_matches_canary(r) for r in store.events_since(started)):
             print("probe: ok (canary access recorded)")
             return True
         if time.monotonic() >= deadline:

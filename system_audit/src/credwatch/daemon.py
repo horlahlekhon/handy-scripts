@@ -26,7 +26,7 @@ from credwatch.allowlist import Allowlist
 from credwatch.backends.base import Backend
 from credwatch.capture import CaptureSupervisor
 from credwatch.config import Config
-from credwatch.correlate import Correlator
+from credwatch.correlate import CANARY_RULE, Correlator
 from credwatch.models import FileAccessEvent, ProcessedEvent, Verdict
 from credwatch.retention import prune_old_files
 from credwatch.store import Store
@@ -235,9 +235,10 @@ class Daemon:
         self._clear_problems(SRC_STORE)
         return True
 
-    def _is_canary(self, pe: ProcessedEvent) -> bool:
-        paths = (pe.event.path, pe.canonical_path)
-        return any(p is not None and os.path.normpath(p) == self._canary for p in paths)
+    @staticmethod
+    def _is_canary(pe: ProcessedEvent) -> bool:
+        """Probe success needs the correlator's identity-verified canary verdict."""
+        return pe.verdict.allowed and pe.verdict.matched_rule == CANARY_RULE
 
     def _submit_flagged(self, batch: Sequence[ProcessedEvent]) -> None:
         subject, body = messages.format_flagged_alert(
@@ -382,6 +383,9 @@ class Daemon:
             except Exception as exc:
                 logger.exception("capture status check failed")
                 problems.append(f"capture status check failed: {type(exc).__name__}: {exc}")
+        canary_problem = getattr(self._correlator, "canary_problem", None)
+        if canary_problem:
+            problems.append(canary_problem)
         self._health_problems = tuple(problems)
         if problems:
             logger.warning("health problems: %s", "; ".join(problems))
@@ -534,3 +538,6 @@ def run_forever(daemon: Daemon) -> None:
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+
+
+178788128900527

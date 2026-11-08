@@ -101,6 +101,8 @@ class FakeCorrelator:
         if ev.comm == "boom":
             raise RuntimeError("correlator exploded")
         allowed = ev.comm != "evil"
+        if allowed and ev.path.endswith("/canary"):
+            return ProcessedEvent(ev, Verdict(True, "credwatch-canary"), None)
         return ProcessedEvent(ev, Verdict(allowed, None if not allowed else "rule"), None)
 
 
@@ -456,6 +458,32 @@ def test_canary_event_marks_probe_ok_and_clears_failure(config, store, data_dir)
     assert store.get_meta("last_canary_ok") == datetime.fromtimestamp(
         BASE_TIME + 5 + 60 + 3600, UTC).isoformat()
     assert len(dispatcher.subjects("canary probe failed")) == 2
+
+
+def test_probe_ok_requires_canary_rule(config, store, data_dir):
+    clock = FakeClock()
+    backend = FakeBackend()
+    canary = str(data_dir / "canary")
+    with Harness(make_daemon(config, store, backend=backend, clock=clock)) as h:
+        h.boot_canary(clock)
+        # on the canary path but flagged (no canary verdict): must not pass the probe
+        backend.feed(ev(path=canary, comm="evil"))
+        h.until(lambda: store.events_since(datetime.fromtimestamp(0, UTC)))
+        assert h.d._canary_deadline is not None
+    assert store.get_meta("last_canary_ok") is None
+
+
+def test_correlator_canary_problem_raises_health_alert(config, store):
+    class Problem(FakeCorrelator):
+        canary_problem = "canary file replaced or missing; re-run credwatch install"
+
+    clock = FakeClock()
+    dispatcher = FakeDispatcher()
+    with Harness(make_daemon(config, store, dispatcher=dispatcher, clock=clock,
+                             correlator=Problem())) as h:
+        clock.advance(daemon_mod.HEALTH_INTERVAL_SECONDS)
+        h.step()
+    assert dispatcher.subjects("canary file replaced or missing")
 
 
 def test_unreadable_canary_sends_health_alert(config, store, data_dir):

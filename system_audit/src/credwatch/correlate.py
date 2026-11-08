@@ -12,6 +12,7 @@ from typing import Any
 import psutil
 
 from credwatch.allowlist import Allowlist
+from credwatch.installer.common import CANARY_BODY
 from credwatch.models import (
     Connection,
     FileAccessEvent,
@@ -24,6 +25,8 @@ from credwatch.models import (
 logger = logging.getLogger(__name__)
 
 MAX_ANCESTRY = 5
+CANARY_RETRY_SECONDS = 60
+CANARY_PROBLEM = "canary file replaced or missing; re-run credwatch install"
 CANARY_RULE = "credwatch-canary"
 _ERR_EXITED = "process exited before snapshot"
 
@@ -126,22 +129,33 @@ def snapshot_process(pid: int | None, now: datetime, *, psutil_mod: Any = psutil
     return result(True, conns, ancestry, "; ".join(errors) or None)
 
 
-def read_canary_identity(path: str) -> tuple[int, int] | None:
-    """(st_ino, st_dev) of the canary via O_NOFOLLOW + fstat; None unless a lone regular file."""
+def read_canary_identity(path: str, owner_uid: int = 0) -> tuple[int, int] | None:
+    """(st_ino, st_dev) of the canary, or None unless it is exactly what install wrote.
+
+    Opened O_NOFOLLOW|O_NONBLOCK (a FIFO must not hang us), then fstat: regular file,
+    owned by `owner_uid`, one link, body equal to the installer's CANARY_BODY.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, flags)
     except OSError as exc:
         logger.warning("cannot open canary %s for identity: %s", path, exc.strerror)
         return None
     try:
         st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != owner_uid:
+            logger.warning(
+                "canary %s is not a root-owned regular file with a single link; no exemption", path
+            )
+            return None
+        body = os.read(fd, len(CANARY_BODY) + 1)
     except OSError as exc:
-        logger.warning("cannot fstat canary %s: %s", path, exc.strerror)
+        logger.warning("cannot read canary %s: %s", path, exc.strerror)
         return None
     finally:
         os.close(fd)
-    if not stat_mod.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        logger.warning("canary %s is not a regular file with a single link; no exemption", path)
+    if body != CANARY_BODY.encode():
+        logger.warning("canary %s content differs from the installed body; no exemption", path)
         return None
     return (st.st_ino, st.st_dev)
 
@@ -170,7 +184,9 @@ class Correlator:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         stat_fn: Callable[[str], Any] = os.stat,
         realpath_fn: Callable[[str], str] = os.path.realpath,
-        canary_identity_fn: Callable[[str], tuple[int, int] | None] = read_canary_identity,
+        canary_identity_fn: Callable[[str], tuple[int, int] | None] | None = None,
+        canary_stat_fn: Callable[[str], Any] = os.stat,
+        canary_owner_uid: int = 0,
     ) -> None:
         self._allowlist = allowlist
         self._self_pid = self_pid
@@ -179,35 +195,50 @@ class Correlator:
         self._clock = clock
         self._stat = stat_fn
         self._realpath = realpath_fn
-        self._identity_fn = canary_identity_fn
-        self._identity: tuple[int, int] | None = None
-        self._identity_loaded = False
+        self._canary_stat = canary_stat_fn
+        self._identity_fn = canary_identity_fn or (
+            lambda p: read_canary_identity(p, canary_owner_uid)
+        )
+        # R52: pinned once at start; events never refresh it (a swapped canary stays refused).
+        self._identity = self._identity_fn(self._canary)
+        self._next_retry = self._clock().timestamp() + CANARY_RETRY_SECONDS
+        self._canary_problem = False
 
-    def _canary_identity(self, refresh: bool = False) -> tuple[int, int] | None:
-        """Lazily computed; refreshed when a candidate mismatches (canary recreated)."""
-        if refresh or not self._identity_loaded or self._identity is None:
-            self._identity = self._identity_fn(self._canary)
-            self._identity_loaded = True
+    @property
+    def canary_problem(self) -> str | None:
+        """Health problem text once the pinned canary was seen replaced or missing."""
+        return CANARY_PROBLEM if self._canary_problem else None
+
+    def _pinned(self) -> tuple[int, int] | None:
+        if self._identity is None:
+            now = self._clock().timestamp()
+            if now >= self._next_retry:  # at most once per CANARY_RETRY_SECONDS
+                self._next_retry = now + CANARY_RETRY_SECONDS
+                self._identity = self._identity_fn(self._canary)
         return self._identity
 
-    def _matches_canary(self, ino: int, dev: int, *, refresh_ok: bool) -> bool:
-        identity = self._canary_identity()
-        if identity == (ino, dev):
-            return True
-        if refresh_ok:
-            return self._canary_identity(refresh=True) == (ino, dev)
-        return False
+    def _canary_intact(self, pinned: tuple[int, int]) -> bool:
+        try:
+            st = self._canary_stat(self._canary)
+            intact = (st.st_ino, st.st_dev) == pinned
+        except OSError:
+            intact = False
+        if not intact:
+            logger.error("canary %s no longer has its pinned identity", self._canary)
+            self._canary_problem = True
+        return intact
 
     def _is_canary_event(self, event: FileAccessEvent) -> str | None:
-        """R51: exemption is by file identity only, never by the path string.
+        """R51/R52: exemption by pinned file identity only, never by the path string.
 
-        Returns the canonical path (or "" when none was needed) on a match, else None.
+        Returns the canonical path ("" when none was needed) on a match, else None.
         """
+        pinned = self._pinned()
+        if pinned is None:
+            return None
         if event.inode is not None and event.dev is not None:
-            # (a) Linux: kernel-reported inode/dev, whatever the path says. Refresh only
-            # when the (untrusted) path claims to be the canary, bounding syscalls.
-            claims = os.path.normpath(event.path) == self._canary
-            if self._matches_canary(event.inode, event.dev, refresh_ok=claims):
+            # (a) Linux: kernel-reported inode/dev, whatever the path says.
+            if (event.inode, event.dev) == pinned and self._canary_intact(pinned):
                 return ""
             return None
         if event.inode is None and event.dev is None:
@@ -220,7 +251,7 @@ class Correlator:
                 st = self._stat(canonical)
             except OSError:
                 return None
-            if self._matches_canary(st.st_ino, st.st_dev, refresh_ok=True):
+            if (st.st_ino, st.st_dev) == pinned and self._canary_intact(pinned):
                 return canonical
         return None
 

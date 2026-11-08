@@ -60,7 +60,8 @@ def ev(path="/h/.aws/credentials", exe="/usr/bin/curl", ts=None, **kw):
 
 def pe(allowed, snapshot=None, **kw):
     canonical = kw.pop("canonical_path", None)
-    return ProcessedEvent(ev(**kw), Verdict(allowed, None if not allowed else "rule"), snapshot, canonical)
+    rule = kw.pop("rule", "rule")
+    return ProcessedEvent(ev(**kw), Verdict(allowed, None if not allowed else rule), snapshot, canonical)
 
 
 @pytest.fixture
@@ -229,7 +230,8 @@ def test_status_probe_ok(env, capsys):
 
     def reader_event():
         store = Store(env["data"] / "events.db")
-        store.record(pe(False, path=str(canary), ts=datetime.now(UTC) + timedelta(seconds=1)))
+        store.record(pe(True, path=str(canary), rule="credwatch-canary",
+                        ts=datetime.now(UTC) + timedelta(seconds=1)))
         store.close()
 
     import threading
@@ -240,6 +242,29 @@ def test_status_probe_ok(env, capsys):
     finally:
         t.join()
     assert "probe: ok" in capsys.readouterr().out
+
+
+def test_probe_ok_requires_canary_rule(env, capsys):
+    """An event on the canary path that lacks the canary verdict does not pass the probe."""
+    canary = env["data"] / "canary"
+    canary.write_text("x")
+    seed(env)
+    when = datetime.now(UTC) + timedelta(seconds=1)
+
+    def reader_event():
+        store = Store(env["data"] / "events.db")
+        store.record(pe(False, path=str(canary), ts=when))
+        store.record(pe(True, path=str(canary), canonical_path=str(canary), ts=when))
+        store.close()
+
+    import threading
+    t = threading.Timer(0.05, reader_event)
+    t.start()
+    try:
+        assert cli.main([*env["argv"], "status", "--probe"]) == 1
+    finally:
+        t.join()
+    assert "FAILED" in capsys.readouterr().out
 
 
 def test_status_probe_fails_without_event(env, capsys):
