@@ -129,11 +129,15 @@ version, change the darwin default in `config.py` and record the result here.
 
 `pipx install --global` puts the entry point in `/usr/local/bin`. On Intel Macs Homebrew
 makes that directory user-owned, so `credwatch install` refuses it (a non-root user could
-swap the code the root daemon runs). Install into root-owned dirs:
+swap the code the root daemon runs). Install into root-owned dirs, from a root-owned copy of the source (pip runs the build as
+root; a user-writable tree would let a non-root user get code run as root):
 
 ```bash
+sudo install -d -o root -g wheel -m 0755 /opt/credwatch-src \
+  && sudo cp -a ./system_audit/. /opt/credwatch-src/ \
+  && sudo chown -R root:wheel /opt/credwatch-src
 sudo PIPX_GLOBAL_HOME=/opt/pipx PIPX_GLOBAL_BIN_DIR=/opt/pipx/bin \
-     pipx install --global ./system_audit
+     pipx install --global /opt/credwatch-src
 sudo /opt/pipx/bin/credwatch install
 ```
 

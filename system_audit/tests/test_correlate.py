@@ -200,11 +200,22 @@ def test_canary_self_read_is_exempt():
     assert pe.snapshot is None and calls == [] and a.seen == []
 
 
-def test_canary_read_by_other_pid_is_checked():
+def test_canary_read_by_other_pid_is_canary_allowed():
     a = StubAllowlist(Verdict(False, None))
     c, calls = make(a)
     pe = c.process(ev(path=CANARY, pid=5))
-    assert not pe.verdict.allowed and len(calls) == 1 and len(a.seen) == 1
+    assert pe.verdict == Verdict(True, "credwatch-canary")
+    assert pe.snapshot is None and calls == [] and a.seen == []
+
+
+def test_status_probe_canary_read_not_flagged():
+    """`credwatch status --probe` reads the canary from another process (R49)."""
+    a = StubAllowlist(Verdict(False, None))
+    c, calls = make(a, realpath_fn=lambda p: CANARY)
+    pe = c.process(ev(path="/proc/self/cwd/alias", pid=31337, inode=1, dev=2))
+    assert pe.verdict == Verdict(True, "credwatch-canary")
+    assert pe.snapshot is None and calls == [] and a.seen == []
+    assert pe.canonical_path == CANARY
 
 
 def test_verified_inode_uses_canonical_path_for_allowlist():

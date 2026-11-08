@@ -6,8 +6,15 @@ contains `system_audit/`). Expected output is indicative; versions and paths may
 
 ## 1. Global pipx install and package-data check
 
+Install from a root-owned copy of the source, never from your own tree: pip runs the
+build (setup code) as root, and a user-writable tree would let a non-root user get code
+run as root.
+
 ```bash
-sudo pipx install --global ./system_audit
+sudo install -d -o root -g root -m 0755 /opt/credwatch-src \
+  && sudo cp -a ./system_audit/. /opt/credwatch-src/ \
+  && sudo chown -R root:root /opt/credwatch-src \
+  && sudo pipx install --global /opt/credwatch-src
 ```
 
 Expected: `installed package credwatch 0.1.0, installed using Python 3.x` and
@@ -47,12 +54,11 @@ The test needs pytest inside the credwatch venv:
 sudo pipx inject --global credwatch pytest pyyaml
 ```
 
-(`pyyaml` is already a dependency; the inject is then a no-op for it.) Run from the repo's
-`system_audit/` directory so `tests/` resolves:
+(`pyyaml` is already a dependency; the inject is then a no-op for it.) Run the tests from
+the root-owned copy (staged in step 1), not from your tree:
 
 ```bash
-cd system_audit
-sudo CREDWATCH_E2E=1 /opt/pipx/venvs/credwatch/bin/python -m pytest tests/test_e2e_linux.py -v -m e2e
+sudo CREDWATCH_E2E=1 /opt/pipx/venvs/credwatch/bin/python -m pytest /opt/credwatch-src/tests/test_e2e_linux.py -v -m e2e
 ```
 
 Expected:

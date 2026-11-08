@@ -159,9 +159,13 @@ class Correlator:
         self._realpath = realpath_fn
 
     def process(self, event: FileAccessEvent) -> ProcessedEvent:
-        if event.pid == self._self_pid and os.path.normpath(event.path) == self._canary:
+        # R49: the canary holds nothing sensitive and reads of it only prove the pipeline
+        # is alive, so any pid (the daemon, or `status --probe`) is allowed, unsnapshotted.
+        if os.path.normpath(event.path) == self._canary:
             return ProcessedEvent(event, Verdict(True, CANARY_RULE), None)
         res = self._resolve(event)
+        if res.canonical is not None and os.path.normpath(res.canonical) == self._canary:
+            return ProcessedEvent(event, Verdict(True, CANARY_RULE), None, canonical_path=res.canonical)
         verdict = self._judge(res)
         snap = None if verdict.allowed else self._safe_snapshot(event.pid)
         return ProcessedEvent(event, verdict, snap, canonical_path=res.canonical)

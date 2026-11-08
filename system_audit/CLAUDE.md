@@ -17,7 +17,8 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'      # once
 .venv/bin/pytest tests/test_allowlist.py::test_name -v           # single test
 .venv/bin/pytest -q --cov=credwatch --cov-fail-under=80          # coverage gate (80% line)
 python3.11 -c "import ast,pathlib,sys; [ast.parse(p.read_text(), str(p)) for d in ('src','tests') for p in pathlib.Path(d).rglob('*.py')]; print('py311 ok')"   # 3.11 syntax sweep
-CREDWATCH_E2E=1 sudo -E .venv/bin/python -m pytest tests/test_e2e_linux.py -v -m e2e   # opt-in, root, real auditd
+sudo pipx inject --global credwatch pytest   # after the root-owned install (see docs/linux-verification.md)
+sudo CREDWATCH_E2E=1 /opt/pipx/venvs/credwatch/bin/python -m pytest /opt/credwatch-src/tests/test_e2e_linux.py -m e2e -v   # opt-in, root, real auditd, root-owned copy only
 ```
 
 The e2e test skips itself if real credwatch audit rules are loaded (key stays `credwatch`); run it before `credwatch install` or move the rules aside. Tests never need root otherwise: every external command goes through the injectable `credwatch.proc.Runner`.
@@ -52,6 +53,7 @@ Flow: backend event -> correlate (canonical path, allowlist) -> store -> (flagge
 
 - **Root-owned everything.** Config/secrets in `/etc/credwatch` (0700/0600); data dir `/var/lib/credwatch` (macOS `/Library/Application Support/credwatch`), never under `~`. Directory creation goes through `safe_fs`/installer no-follow walks; the store opens its DB with `O_NOFOLLOW`. `install` refuses a code location (entry point, interpreter, prefix, package) that is not root-owned.
 - **No credentials in the repo, ever.** SMTP creds only from `CREDWATCH_SMTP_USER` / `CREDWATCH_SMTP_PASSWORD` (env or `secrets.env`); config rejects credential keys; never logged, echoed or stored. `.gitignore` covers the secrets file, `*.db`, `captures/`, `logs/`, `audit-exports/`.
+- **Canary is exempt for any pid** (R49): reads of `<data_dir>/canary` get `Verdict(True, "credwatch-canary")`, no snapshot, so `status --probe` is never alerted.
 - **Fail closed on identity.** Unknown exe -> flagged. Basename allowlist matches only count for root-owned exes in trusted dirs; absolute-path patterns are the escape hatch. `comm` is never matched. Linux canonical paths must match the event inode/dev, else "unverified" -> flagged. macOS name-only exe resolution is untrusted unless `darwin_trust_name_resolution`.
 - **Untrusted text everywhere.** Paths, exe, cmdline and hostnames are escaped (Cc/Cf/Zl/Zp/Cs) in emails, CLI output and CSV; subjects are stripped; paths with control characters are never written into audit rules.
 - **Audit key is exactly `credwatch`; rule format is `-w <path> -p rwa -k credwatch`.** Data dir subfolders are exactly `captures/`, `audit-exports/`, `logs/`, plus `events.db`.

@@ -27,13 +27,15 @@ code cannot rewrite.
 `auditctl -D`, stop the service, edit the config or fill the disk. credwatch cannot
 prevent that. It makes it *visible*:
 
-- **Rule-count health check.** Every 5 minutes the daemon compares the number of loaded
+- **Rule-count health check (Linux only).** Every 5 minutes the daemon compares the number of loaded
   `credwatch` audit rules with what it expects (`auditctl -l`). A mismatch (for example
   after `auditctl -D`) raises a health alert by email.
 - **Canary probe.** Every hour the daemon reads a canary file in its own data dir and
   waits up to 60 s for the matching audit event. No event means the audit pipeline is
   blind, and a health alert is emailed. `sudo credwatch status --probe` runs the same
-  check on demand.
+  check on demand. The canary holds nothing sensitive, so reads of it (by the daemon or by
+  `status --probe`) are recorded as allowed `credwatch-canary` events: visible in reports,
+  never alerted.
 - **Heartbeat.** `status` reports a stale or missing daemon heartbeat (older than 180 s).
 - Health alerts are de-duplicated per source (`health`, `canary`, `backend`): an
   identical problem set is not re-sent for 6 hours, and a cleared problem resets its
@@ -97,11 +99,17 @@ whose entry point, interpreter, install prefix or package directory (or any ance
 not root-owned or is writable by others. A plain `pipx install` into `~/.local` fails
 that check by design.
 
+Install from a root-owned copy of the source, not your own checkout: pip runs the build
+as root, and a user-writable tree would let a non-root user get code run as root.
+
 ### Debian / Linux
 
 ```bash
 sudo apt install pipx auditd tcpdump          # auditd provides auditctl/augenrules
-sudo pipx install --global ./system_audit     # run from the repo root; venv in /opt/pipx
+sudo install -d -o root -g root -m 0755 /opt/credwatch-src \
+  && sudo cp -a ./system_audit/. /opt/credwatch-src/ \
+  && sudo chown -R root:root /opt/credwatch-src   # run from the repo root
+sudo pipx install --global /opt/credwatch-src  # venv in /opt/pipx
 sudo credwatch install                        # config, dirs, audit rules, systemd unit, start
 sudoedit /etc/credwatch/secrets.env           # set the Gmail address and app password
 sudoedit /etc/credwatch/config.yaml           # set email.from_addr and email.to_addrs
@@ -123,8 +131,11 @@ is owned by it. Debian's AppArmor profile may block that; see
 
 ```bash
 brew install pipx
+sudo install -d -o root -g wheel -m 0755 /opt/credwatch-src \
+  && sudo cp -a ./system_audit/. /opt/credwatch-src/ \
+  && sudo chown -R root:wheel /opt/credwatch-src
 sudo PIPX_GLOBAL_HOME=/opt/pipx PIPX_GLOBAL_BIN_DIR=/opt/pipx/bin \
-     pipx install --global ./system_audit
+     pipx install --global /opt/credwatch-src
 sudo /opt/pipx/bin/credwatch install
 sudoedit /private/etc/credwatch/secrets.env
 ```
@@ -273,7 +284,8 @@ The global options `--config PATH`, `--user NAME` and `--secrets-file PATH`, and
   events.db                     SQLite: every event, network snapshots, daily rollups
   canary                        file the health probe reads
   captures/                     rolling tcpdump pcaps, credwatch-YYYYmmdd-HHMMSS.pcap
-  audit-exports/                raw auditd lines (ausearch export; fs_usage-YYYYmmdd.log on macOS)
+  audit-exports/                ausearch-*.txt raw auditd exports (macOS: fs_usage-YYYYmmdd.log)
+    .checkpoint                 ausearch checkpoint, so exports don't repeat events
   logs/                         credwatch.log (macOS also launchd.out.log, launchd.err.log)
 ```
 
@@ -300,7 +312,8 @@ The global options `--config PATH`, `--user NAME` and `--secrets-file PATH`, and
 3. Match the raw audit records in `audit-exports/` for the same timestamp or pid:
 
    ```bash
-   sudo grep -l '<pid>' /var/lib/credwatch/audit-exports/*
+   sudo grep -l 'pid=<pid>' /var/lib/credwatch/audit-exports/ausearch-*.txt        # Linux
+   sudo grep -l '<pid>' "/Library/Application Support/credwatch/audit-exports/"fs_usage-*.log   # macOS
    ```
 4. Rotate every credential the process could have read (assume the worst), then clean up.
 
