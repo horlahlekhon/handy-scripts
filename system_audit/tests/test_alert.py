@@ -14,6 +14,7 @@ from credwatch.alert import (
     CredentialsError,
     Mailer,
     MailerError,
+    QUEUE_MAX,
     SmtpCredentials,
     load_credentials,
     parse_env_file,
@@ -307,7 +308,7 @@ def test_dispatcher_retries_then_reports_error():
 
 def test_auth_failure_log_has_no_password(caplog):
     exc = smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
-    mailer, errors, sleeps = _Mailer(fail_times=99, exc=exc), [], []
+    errors, sleeps = [], []
     creds = SmtpCredentials("u", SECRET)
 
     def factory():
@@ -319,7 +320,10 @@ def test_auth_failure_log_has_no_password(caplog):
         d.start()
         d.submit("s", "b")
         d.stop(timeout=5)
-    assert errors
+    assert len(errors) == 1
+    assert sleeps == []
+    assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
+    assert len(FakeSMTP.instances) == 1
     assert SECRET not in caplog.text
     assert all(SECRET not in e for e in errors)
     assert "535" in caplog.text
@@ -353,12 +357,14 @@ def test_stop_logs_abandoned_pending(caplog):
     d = AlertDispatcher(lambda: Slow(), "h", lambda m: None, sleep=lambda s: None)
     d.start()
     d.submit("one", "b")
-    started.wait(2)
+    assert started.wait(2) is True
     d.submit("two", "b")
     with caplog.at_level(logging.ERROR):
         d.stop(timeout=0.2)
     gate.set()
-    assert "abandon" in caplog.text.lower()
+    text = caplog.text.lower()
+    assert "abandon" in text
+    assert "one" in text and "two" in text
 
 
 def test_surrogate_in_body_still_sends(caplog):
@@ -369,3 +375,59 @@ def test_surrogate_in_body_still_sends(caplog):
     sent = FakeSMTP.instances[0].sent[0]
     assert "\\udcff" in sent.get_content()
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_quit_oserror_does_not_resend(caplog):
+    class QuitFails(FakeSMTP):
+        def quit(self):
+            raise OSError("connection reset")
+
+    m = Mailer(_cfg(), SmtpCredentials("u", "p"), smtp_factory=QuitFails)
+    errors, sleeps = [], []
+    d = AlertDispatcher(lambda: m, "h", errors.append, sleep=sleeps.append)
+    with caplog.at_level(logging.WARNING):
+        d.start()
+        d.submit("s", "b")
+        d.stop(timeout=5)
+    assert len(FakeSMTP.instances) == 1
+    assert len(FakeSMTP.instances[0].sent) == 1
+    assert errors == [] and sleeps == []
+    assert "quit failed" in caplog.text
+
+
+def test_unicode_error_from_send_is_not_retried():
+    class SendFails(FakeSMTP):
+        def send_message(self, msg):
+            raise UnicodeEncodeError("ascii", "x", 0, 1, "boom")
+
+    m = Mailer(_cfg(), SmtpCredentials("u", "p"), smtp_factory=SendFails)
+    with pytest.raises(UnicodeError):
+        m.send("s", "b")
+    assert len(FakeSMTP.instances) == 1
+
+
+def test_message_has_date_and_message_id():
+    m = Mailer(_cfg(), SmtpCredentials("u", "p"), smtp_factory=FakeSMTP)
+    m.send("s", "b")
+    msg = FakeSMTP.instances[0].sent[0]
+    assert msg["Date"] and msg["Message-ID"].startswith("<")
+
+
+def test_submit_after_stop_logs_error(caplog):
+    mailer, errors, sleeps = _Mailer(), [], []
+    d = _dispatcher(mailer, errors, sleeps)
+    d.start()
+    d.stop(timeout=5)
+    with caplog.at_level(logging.ERROR):
+        d.submit("late-subject", "b")
+    assert "alert submitted after dispatcher stop; not sent: late-subject" in caplog.text
+    assert mailer.sent == []
+
+
+def test_stop_logs_pending_dropped_count(caplog):
+    d = _dispatcher(_Mailer(), [], [])
+    for i in range(QUEUE_MAX + 2):
+        d.submit(f"s{i}", "b")
+    with caplog.at_level(logging.ERROR):
+        d.stop(timeout=1)  # never started
+    assert "2 alert(s) were dropped" in caplog.text

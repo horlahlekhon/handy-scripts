@@ -11,6 +11,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -24,7 +25,7 @@ PASSWORD_VAR = "CREDWATCH_SMTP_PASSWORD"
 PLACEHOLDER = "REPLACE_ME"
 SMTP_TIMEOUT_SECONDS = 30
 MAX_ATTEMPTS = 3
-BACKOFF_SECONDS = (5, 30, 120)
+BACKOFF_SECONDS = (5, 30)
 QUEUE_MAX = 1000
 UNKNOWN_KEY = "unknown"
 
@@ -35,6 +36,10 @@ class CredentialsError(Exception):
 
 class MailerError(Exception):
     """Mail delivery refused or failed; message is safe to log."""
+
+
+class AuthenticationFailed(MailerError):
+    """SMTP login rejected; retrying cannot help."""
 
 
 @dataclass(frozen=True)
@@ -141,12 +146,17 @@ class Mailer:
         msg["Subject"] = " ".join(subject.split("\r\n")).replace("\n", " ").replace("\r", " ")
         msg["From"] = self._cfg.from_addr or self._creds.user
         msg["To"] = ", ".join(self._cfg.to_addrs)
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid()
         msg.set_content(body, charset="utf-8")
         return msg
 
-    def _deliver(self, subject: str, body: str) -> None:
+    def _prepare(self, subject: str, body: str) -> EmailMessage:
         msg = self._build(subject, body)
         msg.as_bytes()  # surface encoding errors before any network I/O
+        return msg
+
+    def _deliver(self, msg: EmailMessage) -> None:
         smtp = self._factory(
             self._cfg.smtp_host, self._cfg.smtp_port, timeout=SMTP_TIMEOUT_SECONDS
         )
@@ -159,28 +169,28 @@ class Mailer:
             try:
                 smtp.login(self._creds.user, self._creds.password)
             except smtplib.SMTPAuthenticationError as exc:
-                logger.error("SMTP authentication failed: %s", _safe_error(exc))
-                raise MailerError(
+                raise AuthenticationFailed(
                     f"SMTP authentication failed (SMTP code {exc.smtp_code})"
                 ) from None
             smtp.send_message(msg)
             try:
                 smtp.quit()
-            except smtplib.SMTPException as exc:
+            except (smtplib.SMTPException, OSError) as exc:
                 logger.warning("SMTP quit failed: %s", _safe_error(exc))
         except BaseException:
             try:
                 smtp.close()
-            except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+            except (smtplib.SMTPException, OSError) as exc:
                 logger.warning("SMTP close failed: %s", _safe_error(exc))
             raise
 
     def send(self, subject: str, body: str) -> None:
         try:
-            self._deliver(subject, body)
+            msg = self._prepare(subject, body)
         except UnicodeError:
-            logger.warning("alert not encodable as UTF-8; resending with escaped characters")
-            self._deliver(_escape(subject), _escape(body))
+            logger.warning("alert not encodable as UTF-8; sending with escaped characters")
+            msg = self._prepare(_escape(subject), _escape(body))
+        self._deliver(msg)
 
 
 def _escape(text: str) -> str:
@@ -262,6 +272,9 @@ class AlertDispatcher:
 
     def submit(self, subject: str, body: str) -> None:
         with self._cond:
+            if self._stopping:
+                logger.error("alert submitted after dispatcher stop; not sent: %s", subject)
+                return
             if len(self._queue) >= QUEUE_MAX:
                 dropped_subject, _ = self._queue.popleft()
                 self._dropped += 1
@@ -281,11 +294,16 @@ class AlertDispatcher:
             thread.join(timeout)
         with self._cond:
             self._abandon = True
+            dropped = self._dropped
             pending = [s for s, _ in self._queue]
             if self._in_flight is not None:
                 pending.insert(0, self._in_flight)
             self._queue.clear()
             self._cond.notify_all()
+        if dropped:
+            logger.error(
+                "host %s: %d alert(s) were dropped and never reported", self._hostname, dropped
+            )
         if pending:
             logger.error(
                 "host %s: abandoned %d unsent alert(s): %s",
@@ -327,6 +345,8 @@ class AlertDispatcher:
             try:
                 self._factory().send(subject, body)
                 return True
+            except AuthenticationFailed as exc:
+                return self._give_up(subject, f"{exc}", "authentication failed", 1)
             except Exception as exc:  # noqa: BLE001 - logged, reported after retries
                 last = _safe_error(exc)
                 logger.warning(
@@ -335,7 +355,10 @@ class AlertDispatcher:
                 )
             if attempt < MAX_ATTEMPTS - 1:
                 self._sleep(BACKOFF_SECONDS[attempt])
-        message = f"alert {subject!r} not delivered after {MAX_ATTEMPTS} attempts: {last}"
+        return self._give_up(subject, last, "not delivered", MAX_ATTEMPTS)
+
+    def _give_up(self, subject: str, reason: str, what: str, attempts: int) -> bool:
+        message = f"alert {subject!r} {what} after {attempts} attempt(s): {reason}"
         logger.error(message)
         try:
             self._on_error(message)
