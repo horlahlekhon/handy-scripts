@@ -312,3 +312,33 @@ def test_canonical_path_round_trips(store):
     store.record(pe)
     rows = store.events_since(ts)
     assert [r.canonical_path for r in rows] == ["/real/id_rsa", None]
+
+
+def test_legacy_db_without_late_columns_is_migrated(tmp_path, caplog):
+    import sqlite3
+    p = tmp_path / "e.db"
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+    CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+      path TEXT NOT NULL, pid INTEGER, ppid INTEGER, exe TEXT, comm TEXT, success INTEGER,
+      backend TEXT NOT NULL, allowed INTEGER NOT NULL, matched_rule TEXT, raw TEXT NOT NULL);
+    CREATE TABLE net_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL,
+      taken_at TEXT NOT NULL, alive INTEGER NOT NULL, error TEXT,
+      connections_json TEXT NOT NULL, ancestry_json TEXT NOT NULL);
+    PRAGMA user_version = 1;
+    """)
+    conn.commit()
+    conn.close()
+    p.chmod(0o600)
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    snap = NetworkSnapshot(100, ts, True, (), (), None)
+    with caplog.at_level("INFO"):
+        s = Store(p)
+    try:
+        pe = make_pe(ts, snapshot=snap)
+        s.record(ProcessedEvent(pe.event, pe.verdict, snap, canonical_path="/c"))
+        rows = s.events_since(ts)
+    finally:
+        s.close()
+    assert rows[0].canonical_path == "/c" and rows[0].snapshot.pid == 100
+    assert "added events.canonical_path" in caplog.text

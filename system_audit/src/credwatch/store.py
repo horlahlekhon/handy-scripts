@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
+_LATE_COLUMNS = (("events", "canonical_path", "TEXT"), ("net_snapshots", "pid", "INTEGER"))
+
 _EVENT_SELECT = """
 SELECT e.id, e.ts, e.path, e.pid, e.ppid, e.exe, e.comm, e.success, e.backend,
        e.allowed, e.matched_rule, e.raw,
@@ -241,9 +243,17 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._add_missing_columns()
         if version == 0:
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        for table, column, decl in _LATE_COLUMNS:
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                logger.info("migrated schema: added %s.%s", table, column)
 
     def close(self) -> None:
         try:

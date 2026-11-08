@@ -44,17 +44,24 @@ def _to_connection(c: Any) -> Connection:
     )
 
 
-def _process_info(proc: Any, mod: Any, errors: list[str]) -> ProcessInfo:
-    """Gather exe/cmdline of proc; each field guarded, failures recorded."""
-    exe: str | None = None
-    cmdline: tuple[str, ...] = ()
+def _guarded(call: Callable[[], Any], mod: Any, errors: list[str], pid: int) -> Any:
+    """Run an ancestor psutil call; return None and record the outcome on failure."""
     try:
-        exe = proc.exe() or None
-        cmdline = tuple(proc.cmdline())
+        return call()
     except mod.AccessDenied:
         errors.append("access denied: ancestry")
     except (mod.NoSuchProcess, mod.ZombieProcess):
-        logger.debug("ancestor %s vanished while reading", proc.pid)
+        logger.debug("ancestor %s vanished while reading", pid)
+    except Exception:
+        logger.exception("unexpected error reading ancestor %s", pid)
+        errors.append("unexpected error: ancestry")
+    return None
+
+
+def _process_info(proc: Any, mod: Any, errors: list[str]) -> ProcessInfo:
+    """Gather exe and cmdline of proc; each field guarded separately."""
+    exe = _guarded(proc.exe, mod, errors, proc.pid) or None
+    cmdline = tuple(_guarded(proc.cmdline, mod, errors, proc.pid) or ())
     return ProcessInfo(pid=proc.pid, exe=exe, cmdline=cmdline)
 
 
@@ -69,6 +76,10 @@ def _walk_ancestry(proc: Any, mod: Any, errors: list[str]) -> tuple[ProcessInfo,
             break
         except (mod.NoSuchProcess, mod.ZombieProcess):
             logger.debug("parent vanished during ancestry walk")
+            break
+        except Exception:
+            logger.exception("unexpected error walking ancestry")
+            errors.append("unexpected error: ancestry")
             break
         if current is None:
             break
@@ -152,8 +163,17 @@ class Correlator:
             return ProcessedEvent(event, Verdict(True, CANARY_RULE), None)
         res = self._resolve(event)
         verdict = self._judge(res)
-        snap = None if verdict.allowed else self._snapshot(event.pid, self._clock())
+        snap = None if verdict.allowed else self._safe_snapshot(event.pid)
         return ProcessedEvent(event, verdict, snap, canonical_path=res.canonical)
+
+    def _safe_snapshot(self, pid: int | None) -> NetworkSnapshot:
+        now = self._clock()
+        try:
+            return self._snapshot(pid, now)
+        except Exception as exc:
+            logger.exception("snapshot failed for pid %s", pid)
+            return NetworkSnapshot(pid=pid, taken_at=now, alive=False, connections=(),
+                                   ancestry=(), error=f"snapshot failed: {type(exc).__name__}")
 
     def _canonical(self, path: str) -> str | None:
         try:
@@ -164,18 +184,23 @@ class Correlator:
 
     def _resolve(self, event: FileAccessEvent) -> _Resolution:
         canonical = self._canonical(event.path)
-        if event.inode is None or event.dev is None:
+        if event.inode is None and event.dev is None:
             return _Resolution(event, canonical, True)
+
+        def unverified(reason: str) -> _Resolution:
+            logger.info("unverified path %s: %s", event.path, reason)
+            return _Resolution(event, None, False)
+
+        if event.inode is None or event.dev is None:
+            return unverified("partial inode/dev")
         try:
             if canonical is None:
                 raise OSError("no canonical path")
             st = self._stat(canonical)
         except OSError:
-            logger.info("unverified path %s: stat failed", event.path)
-            return _Resolution(event, canonical, False)
+            return unverified("stat failed")
         if (st.st_ino, st.st_dev) != (event.inode, event.dev):
-            logger.info("unverified path %s: inode/dev mismatch", event.path)
-            return _Resolution(event, canonical, False)
+            return unverified("inode/dev mismatch")
         return _Resolution(replace(event, path=canonical), canonical, True)
 
     def _judge(self, res: _Resolution) -> Verdict:

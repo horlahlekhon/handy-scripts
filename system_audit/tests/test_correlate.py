@@ -223,22 +223,68 @@ def test_inode_mismatch_fails_closed(caplog):
     with caplog.at_level(logging.INFO):
         pe = c.process(ev(inode=1, dev=2))
     assert pe.verdict == Verdict(False, None) and a.seen == []
+    assert pe.canonical_path is None
     assert len(calls) == 1 and "unverified path" in caplog.text
 
 
-def test_stat_failure_fails_closed():
+def test_stat_failure_fails_closed(caplog):
     def boom(p):
         raise FileNotFoundError(p)
 
     c, calls = make(StubAllowlist(), stat_fn=boom)
-    pe = c.process(ev(inode=1, dev=2))
+    with caplog.at_level(logging.INFO):
+        pe = c.process(ev(inode=1, dev=2))
     assert not pe.verdict.allowed and len(calls) == 1
+    assert pe.canonical_path is None and "unverified path" in caplog.text
+
+
+@pytest.mark.parametrize("inode,dev", [(1, None), (None, 2)])
+def test_partial_inode_dev_fails_closed(inode, dev, caplog):
+    a = StubAllowlist()
+    c, calls = make(a)
+    with caplog.at_level(logging.INFO):
+        pe = c.process(ev(inode=inode, dev=dev))
+    assert pe.verdict == Verdict(False, None) and a.seen == []
+    assert pe.canonical_path is None and len(calls) == 1
+    assert "unverified path" in caplog.text
+
+
+def test_raising_snapshot_falls_back(caplog):
+    def boom(pid, now):
+        raise RuntimeError("x")
+
+    c = Correlator(StubAllowlist(Verdict(False, None)), self_pid=999, canary_path=CANARY,
+                   snapshot=boom, clock=lambda: NOW, realpath_fn=lambda p: p)
+    pe = c.process(ev())
+    assert pe.verdict == Verdict(False, None)
+    assert pe.snapshot == NetworkSnapshot(42, NOW, False, (), (), "snapshot failed: RuntimeError")
+    assert "snapshot failed" in caplog.text
+
+
+def test_unexpected_error_in_ancestry_does_not_raise():
+    mod = fake_mod({10: FakeProc(10, parent_exc=RuntimeError("boom"))})
+    snap = snapshot_process(10, NOW, psutil_mod=mod)
+    assert snap.alive and snap.ancestry == ()
+    assert "unexpected error: ancestry" in snap.error
+
+
+def test_unexpected_error_reading_ancestor_keeps_pid():
+    mod = fake_mod({10: FakeProc(10, parent=FakeProc(1, exe_exc=RuntimeError("boom")))})
+    snap = snapshot_process(10, NOW, psutil_mod=mod)
+    assert [a.pid for a in snap.ancestry] == [1]
+    assert "unexpected error: ancestry" in snap.error
+
+
+def test_exe_denied_still_collects_cmdline():
+    parent = FakeProc(1, exe_exc=psutil.AccessDenied(1), cmdline=("init", "--x"))
+    snap = snapshot_process(10, NOW, psutil_mod=fake_mod({10: FakeProc(10, parent=parent)}))
+    assert snap.ancestry[0].exe is None and snap.ancestry[0].cmdline == ("init", "--x")
 
 
 def test_missing_inode_uses_lexical_path():
     a = StubAllowlist()
     c, _ = make(a, realpath_fn=lambda p: "/other")
-    pe = c.process(ev(path="/lex", inode=None, dev=2))
+    pe = c.process(ev(path="/lex", inode=None, dev=None))
     assert a.seen[0].path == "/lex" and pe.canonical_path == "/other"
 
 
