@@ -318,6 +318,16 @@ class Store:
             return self._query("WHERE e.allowed = 0", ())
         return self._query("WHERE e.allowed = 0 AND e.ts >= ?", (_to_text(since),))
 
+    def latest_event_ts(self) -> datetime | None:
+        r = self._conn.execute("SELECT max(ts) FROM events").fetchone()
+        return None if r[0] is None else _from_text(r[0])
+
+    def count_events(self, since: datetime, flagged_only: bool = False) -> int:
+        sql = "SELECT COUNT(*) FROM events WHERE ts >= ?"
+        if flagged_only:
+            sql += " AND allowed = 0"
+        return int(self._conn.execute(sql, (_to_text(since),)).fetchone()[0])
+
     def compute_daily_summary(self, day: date, tz: tzinfo) -> DailySummary:
         start = datetime.combine(day, time.min, tzinfo=tz)
         end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=tz)

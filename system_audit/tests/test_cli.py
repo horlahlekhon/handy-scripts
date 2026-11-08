@@ -415,3 +415,59 @@ def test_get_backend_linux(env):
 def test_get_backend_darwin_unavailable(env):
     with pytest.raises(BackendError, match="macOS backend not available"):
         get_backend(_cfg(env, "darwin"), [], FakeRunner())
+
+
+def test_install_other_import_error_is_not_masked(env, monkeypatch):
+    import builtins
+    real = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name == "credwatch.installer":
+            raise ModuleNotFoundError("No module named 'yaml2'", name="yaml2")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    with pytest.raises(ModuleNotFoundError):
+        cli.main([*env["argv"], "install"])
+
+
+def test_status_and_report_do_not_create_db(env, capsys):
+    assert cli.main([*env["argv"], "status"]) == 1
+    assert cli.main([*env["argv"], "report", "--last", "1h"]) == 1
+    assert "no event database at" in capsys.readouterr().err
+    assert not (env["data"] / "events.db").exists()
+
+
+def test_cell_prefixes_only_strings():
+    assert cli._cell(-5) == "-5"
+    assert cli._cell("-5") == "'-5"
+
+
+def test_report_csv_negative_pid_not_prefixed(env, capsys):
+    store = Store(env["data"] / "events.db")
+    e = ev()
+    store.record(ProcessedEvent(FileAccessEvent(**{**e.__dict__, "pid": -1}), Verdict(False, None), None))
+    store.close()
+    cli.main([*env["argv"], "report", "--last", "1h", "--format", "csv"])
+    row = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))[0]
+    assert row["pid"] == "-1"
+
+
+def test_run_daemon_crash_returns_1(run_env, monkeypatch, capsys):
+    def crash(self, stop):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(FakeDaemon, "run", crash)
+    assert cli.main([*run_env["argv"], "run"]) == 1
+    assert "kaboom" in capsys.readouterr().err
+
+
+def test_status_ignores_failing_service_probe(env, monkeypatch, capsys):
+    class Exploding(FakeRunner):
+        def run(self, argv, *, check=False, timeout=60):
+            raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(cli, "SubprocessRunner", Exploding)
+    seed(env)
+    assert cli.main([*env["argv"], "status"]) == 0
+    assert "unknown (TimeoutExpired)" in capsys.readouterr().out

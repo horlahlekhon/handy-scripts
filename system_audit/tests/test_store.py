@@ -373,3 +373,21 @@ def test_legacy_db_gets_inode_dev_columns(tmp_path):
         assert (s.events_since(t0)[0].inode, s.events_since(t0)[0].dev) == (5, 6)
     finally:
         s.close()
+
+
+def test_latest_event_ts_and_count_events(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    from credwatch.models import FileAccessEvent, ProcessedEvent, Verdict
+    from credwatch.store import Store
+    d = tmp_path / "d"
+    d.mkdir(mode=0o700)
+    st = Store(d / "e.db")
+    assert st.latest_event_ts() is None
+    now = datetime.now(UTC)
+    for allowed, age in ((False, 1), (True, 2), (False, 4000)):
+        ev = FileAccessEvent(now - timedelta(seconds=age), "/p", 1, 1, "/x", "x", True, "b", "r")
+        st.record(ProcessedEvent(ev, Verdict(allowed, None), None))
+    assert st.latest_event_ts() == now - timedelta(seconds=1)
+    assert st.count_events(now - timedelta(minutes=1)) == 2
+    assert st.count_events(now - timedelta(minutes=1), flagged_only=True) == 1
+    st.close()

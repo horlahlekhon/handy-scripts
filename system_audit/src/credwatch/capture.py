@@ -40,7 +40,7 @@ def build_tcpdump_argv(cfg: CaptureConfig, out_dir: Path) -> list[str]:
     ]
 
 
-def _list_captures(out_dir: Path) -> list[Path]:
+def list_captures(out_dir: Path) -> list[Path]:
     if not out_dir.is_dir():
         return []
     return [p for p in sorted(out_dir.glob(PCAP_GLOB)) if not p.is_symlink() and p.is_file()]
@@ -48,7 +48,7 @@ def _list_captures(out_dir: Path) -> list[Path]:
 
 def prune_captures(out_dir: Path, keep: int) -> tuple[Path, ...]:
     """Delete the oldest captures beyond `keep`; the newest file is never deleted."""
-    files = _list_captures(out_dir)
+    files = list_captures(out_dir)
     doomed = files[: max(len(files) - max(keep, 1), 0)]
     deleted: list[Path] = []
     for path in doomed:
@@ -135,7 +135,7 @@ class CaptureSupervisor:
         with self._lock:
             proc = self._proc
         running = proc is not None and proc.poll() is None
-        files = _list_captures(self._out_dir)
+        files = list_captures(self._out_dir)
         return CaptureStatus(running, self._restarts, self._last_error, files[-1] if files else None)
 
     def _check_privilege_drop(self) -> str | None:

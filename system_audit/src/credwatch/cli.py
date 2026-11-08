@@ -26,7 +26,7 @@ from credwatch.alert import (
 )
 from credwatch.backends import get_backend
 from credwatch.backends.base import Backend, BackendError
-from credwatch.capture import PCAP_GLOB, CaptureSupervisor, _list_captures
+from credwatch.capture import PCAP_GLOB, CaptureSupervisor, list_captures
 from credwatch.config import Config, ConfigError, load_config
 from credwatch.daemon import (
     META_ALERT_ERROR,
@@ -70,6 +70,8 @@ CSV_COLUMNS = (
     "ts", "path", "canonical_path", "inode", "dev", "pid", "ppid", "exe", "comm",
     "success", "backend", "allowed", "matched_rule",
 )
+
+INSTALLER_MODULE = "credwatch.installer"
 
 STARTUP_ERRORS = (
     ConfigError, UnknownUser, UnsupportedPlatform, StoreError, BackendError, OSError,
@@ -192,7 +194,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         daemon = Daemon(config, backend, store, build_correlator(config), dispatcher, capture)
         ref.set(daemon)
-        run_forever(daemon)
+        try:
+            run_forever(daemon)
+        except Exception as exc:
+            logger.critical("daemon crashed", exc_info=True)
+            print(f"credwatch run: daemon crashed: {type(exc).__name__}: {_safe(exc)}",
+                  file=sys.stderr)
+            return EXIT_FAILURE
     finally:
         store.close()
     return EXIT_OK
@@ -286,8 +294,16 @@ def _backend_problems(config: Config, runner: Runner) -> tuple[str, ...]:
         return (f"backend health unavailable: {type(exc).__name__}: {exc}",)
 
 
-def _count(rows: Sequence[EventRow]) -> str:
-    return f"{len(rows)} total, {sum(1 for r in rows if not r.allowed)} flagged"
+def _count(pair: tuple[int, int]) -> str:
+    return f"{pair[0]} total, {pair[1]} flagged"
+
+
+def _db_missing(config: Config) -> bool:
+    db = config.data_dir / "events.db"
+    if db.exists():
+        return False
+    print(f"no event database at {_safe(db)} (has credwatch run?)", file=sys.stderr)
+    return True
 
 
 @_guarded
@@ -295,13 +311,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not _require_root("status"):
         return EXIT_USAGE
     config = _load_config(args)
+    if _db_missing(config):
+        return EXIT_FAILURE
     runner = SubprocessRunner()
     now = _now()
     problems = list(_backend_problems(config, runner))
     store = Store(config.data_dir / "events.db")
     try:
-        week = store.events_since(now - timedelta(days=7))
-        day = [r for r in week if r.ts >= now - timedelta(days=1)]
+        day_since, week_since = now - timedelta(days=1), now - timedelta(days=7)
+        counts = {
+            label: (store.count_events(since), store.count_events(since, flagged_only=True))
+            for label, since in (("day", day_since), ("week", week_since))
+        }
+        latest = store.latest_event_ts()
         heartbeat = _parse_ts(store.get_meta(META_HEARTBEAT))
         alert_error = store.get_meta(META_ALERT_ERROR)
         canary_ok = store.get_meta(META_CANARY_OK)
@@ -309,7 +331,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         probe_ok = _probe(store, config.data_dir / "canary") if args.probe else True
     finally:
         store.close()
-    captures = _list_captures(config.data_dir / "captures")
+    captures = list_captures(config.data_dir / "captures")
     newest = datetime.fromtimestamp(captures[-1].stat().st_mtime, UTC) if captures else None
 
     if heartbeat is None or (now - heartbeat).total_seconds() > HEARTBEAT_STALE_SECONDS:
@@ -319,9 +341,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"service:          {_safe(_service_state(config, runner))}")
     print(f"backend health:   {_safe('; '.join(problems)) if problems else 'ok'}")
     print(f"heartbeat:        {_age(heartbeat, now)}")
-    print(f"last event:       {_age(max((r.ts for r in week), default=None), now)} (7 d window)")
-    print(f"events (24 h):    {_count(day)}")
-    print(f"events (7 d):     {_count(week)}")
+    print(f"last event:       {_age(latest, now)}")
+    print(f"events (24 h):    {_count(counts["day"])}")
+    print(f"events (7 d):     {_count(counts["week"])}")
     print(f"captures:         {len(captures)} files ({PCAP_GLOB}), newest {_age(newest, now)}")
     print(f"last alert error: {_safe(alert_error) or 'none'}")
     print(f"last canary ok:   {_safe(canary_ok) or 'never'}")
@@ -357,7 +379,9 @@ def _row_dict(r: EventRow) -> dict:
 def _cell(value: object) -> str:
     """Escape control characters and defuse spreadsheet formulas."""
     text = _safe(value)
-    return "'" + text if text.startswith(FORMULA_PREFIXES) else text
+    if isinstance(value, str) and text.startswith(FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def _render_json(rows: Sequence[EventRow]) -> str:
@@ -415,6 +439,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not _require_root("report"):
         return EXIT_USAGE
     config = _load_config(args)
+    if _db_missing(config):
+        return EXIT_FAILURE
     store = Store(config.data_dir / "events.db")
     try:
         rows = _select_rows(store, args, _now() - args.last)
@@ -465,9 +491,15 @@ def cmd_test_email(args: argparse.Namespace) -> int:
 def cmd_install(args: argparse.Namespace) -> int:
     try:
         from credwatch.installer import run_install
-    except ImportError:
+    except ModuleNotFoundError as exc:
+        if exc.name != INSTALLER_MODULE:
+            logger.exception("installer import failed")
+            raise
         print("installer not available yet", file=sys.stderr)
         return EXIT_USAGE
+    except ImportError:
+        logger.exception("installer import failed")
+        raise
     return int(run_install(user=args.install_user or args.user, start=not args.no_start) or 0)
 
 
