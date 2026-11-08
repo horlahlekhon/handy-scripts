@@ -25,7 +25,16 @@ def _fake_realpath(path: str) -> str:
 class LaunchctlFake:
     def __init__(self, bootout_rc=3, bootstrap_rc=0):
         self.calls: list[tuple[str, ...]] = []
-        self.bootout_rc, self.bootstrap_rc = bootout_rc, bootstrap_rc
+        self.bootout_rc = bootout_rc
+        self.bootstrap_rcs = [bootstrap_rc]
+
+    @property
+    def bootstrap_rc(self):
+        return self.bootstrap_rcs[0]
+
+    @bootstrap_rc.setter
+    def bootstrap_rc(self, rc):
+        self.bootstrap_rcs = [rc]
 
     def run(self, argv, *, check=False, timeout=60):
         argv = tuple(argv)
@@ -33,9 +42,13 @@ class LaunchctlFake:
         if argv[:2] == ("launchctl", "bootout"):
             return subprocess.CompletedProcess(argv, self.bootout_rc, "", "Boot-out failed: 3: No such process")
         if argv[:2] == ("launchctl", "bootstrap"):
-            err = "Bootstrap failed: 5: Input/output error" if self.bootstrap_rc else ""
-            return subprocess.CompletedProcess(argv, self.bootstrap_rc, "", err)
+            rc = self.bootstrap_rcs.pop(0) if len(self.bootstrap_rcs) > 1 else self.bootstrap_rcs[0]
+            err = f"Bootstrap failed: {rc}: Input/output error" if rc else ""
+            return subprocess.CompletedProcess(argv, rc, "", err)
         return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def count_bootstrap(self):
+        return sum(1 for c in self.calls if c[:2] == ("launchctl", "bootstrap"))
 
 
 @pytest.fixture(autouse=True)
@@ -65,17 +78,18 @@ def env(tmp_path, monkeypatch):
         macos, "assert_root_owned_install", lambda exe, *a, **k: trust_checked.append(exe)
     )
     runner = LaunchctlFake()
+    sleeps: list[float] = []
 
     def install(**kw):
         kw.setdefault("executable", exe)
         return macos.install(
             target, runner=runner, root=root, owner_uid=os.geteuid(),
-            realpath=_fake_realpath, **kw,
+            realpath=_fake_realpath, sleep=sleeps.append, **kw,
         )
 
     return SimpleNamespace(root=root, etc=etc, home=home, target=target, exe=exe,
                            runner=runner, install=install, trust_checked=trust_checked,
-                           data=root / DATA)
+                           data=root / DATA, sleeps=sleeps)
 
 
 def _mode(p: Path) -> int:
@@ -148,6 +162,10 @@ def test_plist_has_keepalive_and_secrets_arg():
 
 def test_plist_arguments_parse_as_run_command():
     data = plistlib.loads(macos.render_plist(Path("/x/credwatch"), Path("/d")))
+    assert data["ProgramArguments"] == [
+        "/x/credwatch", "run", "--config", "/etc/credwatch/config.yaml",
+        "--secrets-file", "/etc/credwatch/secrets.env",
+    ]
     ns = build_parser().parse_args(data["ProgramArguments"][1:])
     assert (ns.command, ns.config, ns.secrets_file) == (
         "run", "/etc/credwatch/config.yaml", "/etc/credwatch/secrets.env",
@@ -214,6 +232,23 @@ def test_bootstrap_failure_raises(env):
     env.runner.bootstrap_rc = 5
     with pytest.raises(InstallError, match="launchctl bootstrap .* failed.*Input/output error"):
         env.install()
+    assert env.runner.count_bootstrap() == 2  # one retry on EIO
+    assert env.sleeps == [1.0]
+
+
+def test_bootstrap_eio_retried_once_then_succeeds(env, caplog):
+    env.runner.bootstrap_rcs = [5, 0]
+    env.install()
+    assert env.runner.count_bootstrap() == 2
+    assert env.sleeps == [1.0]
+    assert "retrying once" in caplog.text
+
+
+def test_bootstrap_other_error_not_retried(env):
+    env.runner.bootstrap_rc = 37
+    with pytest.raises(InstallError, match="rc=37"):
+        env.install()
+    assert env.runner.count_bootstrap() == 1 and env.sleeps == []
 
 
 def test_no_start_skips_launchctl(env):

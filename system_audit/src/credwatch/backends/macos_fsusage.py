@@ -45,12 +45,20 @@ EXPORT_FILE_MODE = 0o600
 EXPORT_NAME = "fs_usage-{day}.log"
 _EXPORT_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
 
-_LINE = re.compile(
-    r"^(?P<ts>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<op>\S+)\s+(?P<mid>.*?)"
-    r"\s+\d+\.\d+(?:\s+W)?\s+(?P<proc>.+)\.(?P<tid>\d+)\s*$"
+UNKNOWN_PROC = "?"
+MISS_LOG_INTERVAL_SECONDS = 60
+
+_HEAD = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<op>\S+)\s+(?P<rest>.*)$")
+# Anchored from the right: the greedy `mid` makes `elapsed` the LAST float, and the
+# name is bounded to MAXCOMLEN, so " 1.5 " inside a path cannot end the path early.
+_TAIL = re.compile(
+    rf"^(?P<mid>.*)\s+\d+\.\d+(?:\s+W)?\s+(?P<proc>.{{1,{MAXCOMLEN}}})\.(?P<tid>\d+)\s*$"
 )
+# Fallback when the name.tid tail is missing or mangled: drop a trailing elapsed column.
+_LOOSE_TAIL = re.compile(r"^(?P<mid>.*)\s+\d+\.\d+(?:\s+W)?(?:\s+.*)?$")
 _PATH = re.compile(r"(?:^|\s)(/.*)$")
 _ERRNO = re.compile(r"\[\s*(\d+)\]")
+_WS = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -58,7 +66,7 @@ class FsUsageHit:
     timestamp: datetime  # tz-aware UTC
     op: str
     path: str
-    proc_name: str
+    proc_name: str  # UNKNOWN_PROC when the name.tid tail could not be parsed
     tid: int | None
     raw: str
     errno: int | None = None  # set when fs_usage shows `[ N]` (the call failed)
@@ -75,6 +83,58 @@ def _timestamp(text: str, today: date, now: datetime) -> datetime | None:
     return local.astimezone(timezone.utc)
 
 
+def _loose_path(candidate: str, matcher: WatchMatcher) -> str | None:
+    """Longest whitespace-cut prefix of candidate that is a watched path."""
+    cuts = [m.start() for m in _WS.finditer(candidate)]
+    for end in [len(candidate), *reversed(cuts)]:
+        path = candidate[:end].rstrip()
+        if path and matcher.matches(path):
+            return path
+    return None
+
+
+def parse_fs_usage_line_detail(
+    line: str, matcher: WatchMatcher, today: date, now: datetime
+) -> tuple[FsUsageHit | None, str | None]:
+    """(hit, miss). `miss` explains a line that names a relevant op but parsed badly.
+
+    Fail closed: if the name.tid tail is unparseable but a watched path is
+    present, the hit is still returned with proc_name=UNKNOWN_PROC, tid=None.
+    """
+    text = line.rstrip("\r\n")
+    head = _HEAD.match(text)
+    if head is None or head.group("op") not in RELEVANT_OPS:
+        return None, None
+    rest = head.group("rest")
+    tail = _TAIL.match(rest)
+    if tail is not None:
+        mid = tail.group("mid")
+        found = _PATH.search(mid)
+        if found is None:
+            return None, None
+        path: str | None = found.group(1).rstrip()
+        if not matcher.matches(path):
+            return None, None
+        proc_name, tid, miss = tail.group("proc").strip(), int(tail.group("tid")), None
+    else:
+        loose = _LOOSE_TAIL.match(rest)
+        mid = loose.group("mid") if loose else rest
+        found = _PATH.search(mid)
+        path = _loose_path(found.group(1), matcher) if found else None
+        if found is None or path is None:
+            return None, "relevant op with unparseable tail and no watched path"
+        proc_name, tid, miss = UNKNOWN_PROC, None, "unparseable name.tid tail; flagged"
+    timestamp = _timestamp(head.group("ts"), today, now)
+    if timestamp is None:
+        return None, "unparseable timestamp on a watched path"
+    err = _ERRNO.search(mid[: found.start(1)])
+    hit = FsUsageHit(
+        timestamp=timestamp, op=head.group("op"), path=path, proc_name=proc_name, tid=tid,
+        raw=text, errno=int(err.group(1)) if err else None,
+    )
+    return hit, miss
+
+
 def parse_fs_usage_line(
     line: str, matcher: WatchMatcher, today: date, now: datetime
 ) -> FsUsageHit | None:
@@ -82,29 +142,7 @@ def parse_fs_usage_line(
 
     `now` must be tz-aware local time (fs_usage prints local wall-clock times).
     """
-    match = _LINE.match(line.rstrip("\r\n"))
-    if match is None or match.group("op") not in RELEVANT_OPS:
-        return None
-    mid = match.group("mid")
-    path_match = _PATH.search(mid)
-    if path_match is None:
-        return None
-    path = path_match.group(1).rstrip()
-    if not matcher.matches(path):
-        return None
-    timestamp = _timestamp(match.group("ts"), today, now)
-    if timestamp is None:
-        return None
-    err = _ERRNO.search(mid[: path_match.start(1)])
-    return FsUsageHit(
-        timestamp=timestamp,
-        op=match.group("op"),
-        path=path,
-        proc_name=match.group("proc").strip(),
-        tid=int(match.group("tid")),
-        raw=line.rstrip("\r\n"),
-        errno=int(err.group(1)) if err else None,
-    )
+    return parse_fs_usage_line_detail(line, matcher, today, now)[0]
 
 
 # --- pid resolution ---------------------------------------------------------------
@@ -126,6 +164,30 @@ def _tid_is_pid(proc_name: str, tid: int, mod: Any) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class PidResolution:
+    pid: int | None
+    candidates: tuple[int, ...]
+    by_tid: bool  # True only when the tid itself is a live pid with a matching name
+
+
+def resolve_pid_detail(proc_name: str, tid: int | None, psutil_mod: Any = psutil) -> PidResolution:
+    mod = psutil_mod
+    if proc_name == UNKNOWN_PROC:
+        return PidResolution(None, (), False)
+    if tid is not None and _tid_is_pid(proc_name, tid, mod):
+        return PidResolution(tid, (tid,), True)
+    try:
+        candidates = tuple(
+            p.info["pid"] for p in mod.process_iter(["pid", "name"])
+            if _name_matches(proc_name, p.info.get("name"))
+        )
+    except Exception:
+        logger.exception("process scan failed while resolving %r", proc_name)
+        return PidResolution(None, (), False)
+    return PidResolution(candidates[0] if len(candidates) == 1 else None, candidates, False)
+
+
 def resolve_pid(
     proc_name: str, tid: int | None, psutil_mod: Any = psutil
 ) -> tuple[int | None, tuple[int, ...]]:
@@ -135,18 +197,8 @@ def resolve_pid(
     with that pid has a matching name; otherwise a unique live process with
     that name is used; otherwise (None, candidates).
     """
-    mod = psutil_mod
-    if tid is not None and _tid_is_pid(proc_name, tid, mod):
-        return tid, (tid,)
-    try:
-        candidates = tuple(
-            p.info["pid"] for p in mod.process_iter(["pid", "name"])
-            if _name_matches(proc_name, p.info.get("name"))
-        )
-    except Exception:
-        logger.exception("process scan failed while resolving %r", proc_name)
-        return None, ()
-    return (candidates[0] if len(candidates) == 1 else None), candidates
+    res = resolve_pid_detail(proc_name, tid, psutil_mod)
+    return res.pid, res.candidates
 
 
 def _process_details(pid: int, mod: Any) -> tuple[int | None, str | None]:
@@ -185,6 +237,7 @@ class MacFsUsageBackend(Backend):
         psutil_mod: Any = psutil,
         clock: Callable[[], float] = time.monotonic,
         now_fn: Callable[[], datetime] = _local_now,
+        trust_name_resolution: bool = False,
     ) -> None:
         paths = tuple(watch_paths)
         self._matcher = WatchMatcher(paths, case_insensitive=True)  # APFS default
@@ -198,6 +251,9 @@ class MacFsUsageBackend(Backend):
         self._proc: Any = None
         self._exit_problem: str | None = None
         self._last_line_at: float | None = None
+        self._trust_names = trust_name_resolution
+        self._miss_logged_at: float | None = None
+        self._misses_suppressed = 0
 
     # -- health / export --
 
@@ -237,16 +293,37 @@ class MacFsUsageBackend(Backend):
         folded = line.casefold()
         return any(p in folded for p in self._prefilter)
 
+    def _note_miss(self, reason: str, line: str) -> None:
+        """WARNING per parse miss, at most once per MISS_LOG_INTERVAL_SECONDS."""
+        now = self._clock()
+        last = self._miss_logged_at
+        if last is not None and now - last < MISS_LOG_INTERVAL_SECONDS:
+            self._misses_suppressed += 1
+            return
+        suppressed, self._misses_suppressed, self._miss_logged_at = self._misses_suppressed, 0, now
+        logger.warning("fs_usage parse miss (%s; %d similar suppressed): %r",
+                       reason, suppressed, line.rstrip("\r\n"))
+
     def _to_event(self, hit: FsUsageHit) -> FileAccessEvent:
-        pid, candidates = resolve_pid(hit.proc_name, hit.tid, self._psutil)
-        ppid, exe = _process_details(pid, self._psutil) if pid is not None else (None, None)
-        raw = hit.raw
-        if pid is None:
-            listed = ", ".join(str(c) for c in candidates) or "none alive"
-            raw = f"{raw}\npid candidates: {listed}"
+        res = resolve_pid_detail(hit.proc_name, hit.tid, self._psutil)
+        ppid, exe = (
+            _process_details(res.pid, self._psutil) if res.pid is not None else (None, None)
+        )
+        notes: list[str] = []
+        if hit.proc_name == UNKNOWN_PROC:
+            notes.append("process unknown: fs_usage name.tid tail unparseable")
+        elif res.pid is None:
+            notes.append(
+                "pid candidates: " + (", ".join(str(c) for c in res.candidates) or "none alive")
+            )
+        if exe is not None and not res.by_tid and not self._trust_names:
+            notes.append(f"exe resolved by name only: {exe}")
+            exe = None  # spoofable: fail closed unless darwin_trust_name_resolution
+        raw = "\n".join((hit.raw, *notes))
         return FileAccessEvent(
-            timestamp=hit.timestamp, path=hit.path, pid=pid, ppid=ppid, exe=exe,
-            comm=hit.proc_name, success=hit.errno is None, backend=BACKEND_NAME, raw=raw,
+            timestamp=hit.timestamp, path=hit.path, pid=res.pid, ppid=ppid, exe=exe,
+            comm=None if hit.proc_name == UNKNOWN_PROC else hit.proc_name,
+            success=hit.errno is None, backend=BACKEND_NAME, raw=raw,
         )
 
     def _spawn(self) -> Any:
@@ -287,7 +364,9 @@ class MacFsUsageBackend(Backend):
                 if not self._prefiltered(line):
                     continue
                 now = self._now()
-                hit = parse_fs_usage_line(line, self._matcher, now.date(), now)
+                hit, miss = parse_fs_usage_line_detail(line, self._matcher, now.date(), now)
+                if miss is not None:
+                    self._note_miss(miss, line)
                 if hit is None:
                     continue
                 self._append_export(hit.raw, now.date())
@@ -298,12 +377,13 @@ class MacFsUsageBackend(Backend):
             done.set()
             _finish(proc, eof)
             helpers[0].join(1)
+            _close_pipes(proc)
             with self._lock:
                 self._proc = None
         if stop.is_set():
             return
         problem = f"fs_usage exited (rc={proc.returncode})"
-        detail = " ".join(s.strip() for s in tail if s.strip())
+        detail = " ".join(s.strip() for s in tuple(tail) if s.strip())
         if detail:
             problem = f"{problem}: {detail}"
         with self._lock:
@@ -326,6 +406,15 @@ def _drain_stderr(proc: Any, tail: collections.deque[str]) -> None:
             tail.append(line)
     except (OSError, ValueError):
         logger.warning("could not read fs_usage stderr", exc_info=True)
+
+
+def _close_pipes(proc: Any) -> None:
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except (OSError, ValueError):
+            logger.warning("could not close fs_usage pipe", exc_info=True)
 
 
 def _finish(proc: Any, eof: bool) -> None:

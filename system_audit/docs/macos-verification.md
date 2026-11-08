@@ -5,6 +5,23 @@ built on Linux against a hand-written fixture (`tests/fixtures/fs_usage_sample.t
 fakes. Each step below is for a human on a Mac. Record what actually happens, and fix
 the code or this file where reality differs.
 
+## Known gaps (read first)
+
+The fs_usage backend is a stop-gap and much weaker than the Linux auditd backend:
+
+- **Matching is lexical.** An access is caught only when fs_usage prints a path that
+  string-matches a watched path, case-insensitively.
+- **Aliases are not detected.** Relative-path opens (`cd ~/.aws && cat credentials`, if
+  fs_usage prints the relative name), symlink aliases (`ln -s ~/.aws/credentials /tmp/x`)
+  and hard links (`ln ~/.aws/credentials /tmp/x; cat /tmp/x`) all read the secret under a
+  path credwatch does not watch.
+- **No inode verification.** fs_usage reports no inode/dev, so the correlator cannot
+  confirm which file was actually opened.
+- **Process identity is weak.** See "Process attribution" below.
+
+The recommended future backend is **eslogger** (macOS 13+, Endpoint Security). It reports
+the real pid, audit token, executable and resolved file paths for each open.
+
 ## 1. Capture a real fs_usage fixture
 
 ```bash
@@ -24,7 +41,16 @@ parser where the real format differs from these assumptions:
 - columns: `HH:MM:SS.ffffff  op  F=fd|[errno]  (mode)  /path  elapsed  [W]  name.NNNN`;
 - failed calls print `[ errno]` before the path;
 - paths with spaces are printed unquoted;
-- long process names arrive truncated to 16 characters.
+- long process names arrive truncated to 16 characters (the parser bounds the name to
+  16 characters; a longer name makes the line fall back to "process unknown", flagged);
+- `rename`/`renameat` print one path or two (old and new). Rename a watched file and look
+  at the line. If two paths appear, the parser currently reads both as one path, which
+  matches no watched path, so the rename is **missed**. Split the paths in the parser
+  before relying on rename detection;
+- control characters in process names: run a process whose name contains a newline or CR
+  (`cp /bin/cat "/tmp/a$(printf '\r')b"` and run it on a watched file). Check whether
+  fs_usage escapes the character or prints it raw. A raw CR/LF splits the line; credwatch
+  then flags the access as "process unknown" and logs `fs_usage parse miss` at WARNING.
 
 ## 2. Thread id vs pid
 
@@ -36,7 +62,23 @@ Compare that pid with the trailing number on its fs_usage line.
   resolution then falls back to a name lookup.
 - If they are equal, `resolve_pid` already prefers it. Note this in the fixture header.
 
-## 3. `tcpdump -i any` vs `pktap,all`
+## 3. Backpressure
+
+Events are processed inline on the thread that reads fs_usage's stdout: each match does a
+psutil process scan and then a correlation. If that work falls behind fs_usage's output
+rate (for example `find ~ -name '*.env'` or an IDE indexing your home directory),
+fs_usage's pipe fills and fs_usage itself may stall or drop events. Run such a workload
+with credwatch active and watch:
+
+- `sudo credwatch status` (heartbeat, "no fs_usage output for 60 s");
+- whether fs_usage prints dropped-event warnings to stderr (they show up in the
+  `fs_usage exited` health message and in `launchd.err.log`);
+- whether the canary probe still passes during the load.
+
+If it falls behind, move the matching off the reader thread (bounded queue) before relying
+on macOS.
+
+## 4. `tcpdump -i any` vs `pktap,all`
 
 ```bash
 sudo tcpdump -i any -c 5 -n
@@ -46,7 +88,7 @@ sudo tcpdump -i pktap,all -c 5 -n
 The darwin default is `capture.interface: pktap,all`. If only `any` works on your macOS
 version, change the darwin default in `config.py` and record the result here.
 
-## 4. Install and Full Disk Access
+## 5. Install and Full Disk Access
 
 `pipx install --global` puts the entry point in `/usr/local/bin`. On Intel Macs Homebrew
 makes that directory user-owned, so `credwatch install` refuses it (a non-root user could
@@ -63,15 +105,16 @@ Expected: `created:` lines for `/private/etc/credwatch`, the config and secrets 
 list, and `plist /Library/LaunchDaemons/com.credwatch.daemon.plist`. Run it a second time:
 everything should show `unchanged:`, and the daemon is reloaded (bootout, then bootstrap).
 
-If `launchctl bootstrap` fails with `5: Input/output error` right after the bootout,
-re-run the install (launchd may not have finished removing the old job).
+If `launchctl bootstrap` returns `5: Input/output error` right after the bootout, the
+installer retries once after 1 s (launchd may not have finished removing the old job).
+If the retry fails too, re-run the install.
 
 Grant **Full Disk Access** to the credwatch executable and to `/usr/bin/fs_usage`. Without
 it, reads under `~/Library` and other TCC-protected paths may not be reported. Use System
 Settings → Privacy & Security → Full Disk Access → `+`, and press ⌘⇧G to type the path.
 Then `sudo launchctl kickstart -k system/com.credwatch.daemon`.
 
-## 5. Probe
+## 6. Probe
 
 ```bash
 sudo /opt/pipx/bin/credwatch status --probe
@@ -83,15 +126,21 @@ Full Disk Access grants, then repeat. Record the actual outcome here.
 
 ## Known macOS limitations (by design)
 
-- **Noisier alerts.** fs_usage gives only a process name and a thread id. credwatch fills
-  `exe` through psutil only when it can resolve a single pid. Short-lived readers (`cat`)
-  usually exit first, so `exe` is unknown and the allowlist **fails closed**: those events
-  are flagged. Expect more flagged events than on Linux.
-- **Name-based pid resolution can be wrong.** When the thread id is not a pid,
-  credwatch picks the only live process with the same name. A malicious process named
-  like an allowlisted tool (`ssh`) that exits quickly, while a real `/usr/bin/ssh` runs,
-  can be attributed to the real one and be allowed. The candidates are recorded in the
-  event's `raw` when the pick is ambiguous. Treat macOS verdicts as weaker than Linux ones.
+- **Process attribution; macOS flags nearly everything by default.** fs_usage gives only
+  a process name and a thread id. `exe` is trusted only when the thread id is itself a
+  live pid whose name matches, which is rare. Otherwise credwatch can only look the pid up
+  by name, and a name is spoofable: a malicious process named `ssh` that exits quickly
+  while a real `/usr/bin/ssh` runs would be attributed to the real binary. So by default a
+  name-only exe is recorded in the event's `raw` (`exe resolved by name only: ...`), but
+  `exe` stays unknown and the allowlist **fails closed**: the event is flagged. Expect
+  most macOS events to be flagged.
+  - Set `darwin_trust_name_resolution: true` in the config to accept name-only exes.
+    Alerts get quieter, but an attacker who can pick a process name can get allowed.
+  - Ambiguous names (several live processes) and processes that have already exited
+    always leave `exe` unknown. The candidate pids are recorded in `raw`.
+- **Unparseable lines fail closed.** A watched-path access whose `name.tid` tail cannot be
+  parsed is still recorded, as "process unknown", and flagged. A rate-limited WARNING
+  `fs_usage parse miss` is logged.
 - **No inode/dev.** fs_usage reports no inode, so the correlator verifies by lexical path
   (canonicalised with `realpath`) only, which is weaker than the Linux inode check.
 - **Case-insensitive matching.** APFS is case-insensitive by default, so watched paths

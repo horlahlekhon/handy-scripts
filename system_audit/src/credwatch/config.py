@@ -75,6 +75,8 @@ class Config:
     email: EmailConfig
     audit_export: ExportConfig
     os_name: str
+    # macOS only: trust an exe found by process-name lookup (spoofable; see docs).
+    darwin_trust_name_resolution: bool = False
 
 
 _TRUSTED_DIRS = {
@@ -139,6 +141,7 @@ def default_config_dict(os_name: str) -> dict[str, Any]:
             "coalesce_seconds": 60,
         },
         "audit_export": {"interval_minutes": 60, "retention_days": 30},
+        "darwin_trust_name_resolution": False,
     }
 
 
@@ -260,7 +263,10 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
     return loaded
 
 
-_TOP_KEYS = {"data_dir", "extra_paths", "env_scan", "allowlist", "allowlist_trusted_dirs", "capture", "email", "audit_export"}
+_TOP_KEYS = {
+    "data_dir", "extra_paths", "env_scan", "allowlist", "allowlist_trusted_dirs", "capture",
+    "email", "audit_export", "darwin_trust_name_resolution",
+}
 
 
 def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
@@ -318,6 +324,10 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
         retention_days=_int(ex, "audit_export", "retention_days", 1),
     )
 
+    trust_names = merged["darwin_trust_name_resolution"]
+    if not isinstance(trust_names, bool):
+        raise ConfigError("darwin_trust_name_resolution: must be true or false")
+
     return Config(
         target_user=target.name,
         home=home,
@@ -333,4 +343,5 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
         email=email,
         audit_export=audit_export,
         os_name=os_name,
+        darwin_trust_name_resolution=trust_names,
     )

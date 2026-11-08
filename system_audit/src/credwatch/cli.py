@@ -503,7 +503,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     from credwatch.installer import InstallError
 
     try:
-        target = resolve_target_user(args.install_user or args.user, os.environ)
+        target = resolve_target_user(args.user, os.environ)
         report = run_install(
             current_os(), target, runner=SubprocessRunner(), start=not args.no_start
         )
@@ -529,25 +529,44 @@ def _print_install_report(report) -> None:
 # --- parser -------------------------------------------------------------------------
 
 
+def _shared_options(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
+    """Options accepted before AND after the subcommand.
+
+    The subcommand copies use SUPPRESS so they only override the top-level
+    value when given; `credwatch run --config X` (systemd/launchd) and
+    `credwatch --config X run` (tests) both work, and the later one wins.
+    """
+    def default(value: object) -> object:
+        return argparse.SUPPRESS if suppress else value
+
+    parser.add_argument("--config", default=default(str(CONFIG_PATH)), help="config file path")
+    parser.add_argument("--user", default=default(None), help="user whose credentials are watched")
+    parser.add_argument("--secrets-file", default=default(None),
+                        help="env-style file holding CREDWATCH_SMTP_* values")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="credwatch", description="Credential file access monitor")
-    parser.add_argument("--config", default=str(CONFIG_PATH), help="config file path")
-    parser.add_argument("--user", help="user whose credentials are watched")
-    parser.add_argument("--secrets-file", help="env-style file holding CREDWATCH_SMTP_* values")
+    _shared_options(parser, suppress=False)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    shared = argparse.ArgumentParser(add_help=False)
+    _shared_options(shared, suppress=True)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="run the monitoring daemon (root)")
+    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=help_text, parents=[shared])
+
+    run = add("run", "run the monitoring daemon (root)")
     # Test-only (tests/test_e2e_linux.py): read the watch list from PATH instead of
     # /etc/credwatch/watched_paths.txt. Hidden from --help on purpose.
     run.add_argument("--watch-list", metavar="PATH", help=argparse.SUPPRESS)
     run.set_defaults(func=cmd_run)
 
-    status = sub.add_parser("status", help="show daemon health (root)")
+    status = add("status", "show daemon health (root)")
     status.add_argument("--probe", action="store_true", help="read the canary and wait for its event")
     status.set_defaults(func=cmd_status)
 
-    report = sub.add_parser("report", help="list recorded events (root)")
+    report = add("report", "list recorded events (root)")
     report.add_argument("--last", type=parse_duration, required=True, metavar="DURATION")
     report.add_argument("--flagged", action="store_true")
     report.add_argument("--process", metavar="NAME")
@@ -555,10 +574,9 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--output", metavar="PATH")
     report.set_defaults(func=cmd_report)
 
-    sub.add_parser("test-email", help="send a test email").set_defaults(func=cmd_test_email)
+    add("test-email", "send a test email").set_defaults(func=cmd_test_email)
 
-    install = sub.add_parser("install", help="install the service (root)")
-    install.add_argument("--user", dest="install_user", metavar="NAME")
+    install = add("install", "install the service (root)")
     install.add_argument("--no-start", action="store_true")
     install.set_defaults(func=cmd_install)
     return parser

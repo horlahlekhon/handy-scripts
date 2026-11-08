@@ -537,3 +537,31 @@ def test_status_ignores_failing_service_probe(env, monkeypatch, capsys):
     seed(env)
     assert cli.main([*env["argv"], "status"]) == 0
     assert "unknown (TimeoutExpired)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["run", "status", "test-email", "install"])
+def test_shared_options_accepted_after_subcommand(command):
+    ns = cli.build_parser().parse_args(
+        [command, "--config", "/c.yaml", "--secrets-file", "/s.env", "--user", "bob"]
+    )
+    assert (ns.command, ns.config, ns.secrets_file, ns.user) == (command, "/c.yaml", "/s.env", "bob")
+
+
+def test_shared_options_before_subcommand_still_work():
+    ns = cli.build_parser().parse_args(
+        ["--config", "/c.yaml", "--user", "root", "--secrets-file", "/s.env", "run",
+         "--watch-list", "/w"]
+    )
+    assert (ns.config, ns.user, ns.secrets_file, ns.watch_list) == (
+        "/c.yaml", "root", "/s.env", "/w",
+    )
+
+
+def test_subcommand_option_wins_over_global():
+    ns = cli.build_parser().parse_args(["--config", "/global.yaml", "run", "--config", "/sub.yaml"])
+    assert ns.config == "/sub.yaml"
+
+
+def test_shared_option_defaults_when_absent():
+    ns = cli.build_parser().parse_args(["status"])
+    assert (ns.config, ns.secrets_file, ns.user) == (str(cli.CONFIG_PATH), None, None)

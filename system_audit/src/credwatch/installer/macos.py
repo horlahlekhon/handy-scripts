@@ -10,6 +10,7 @@ import logging
 import os
 import plistlib
 import stat
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ WHEEL_GROUP = "wheel"
 LOG_SUBDIR = "logs"
 STDOUT_LOG = "launchd.out.log"
 STDERR_LOG = "launchd.err.log"
+BOOTSTRAP_EIO = 5  # launchd has not finished tearing down the booted-out job
+BOOTSTRAP_RETRY_DELAY_SECONDS = 1.0
 # Root-owned symlinks into /private on macOS; safe_fs refuses symlinked
 # ancestors, so paths under these are handed to it in resolved form.
 SYMLINKED_SYSTEM_PREFIXES = (Path("/etc"), Path("/var"), Path("/tmp"))
@@ -73,10 +76,9 @@ def render_plist(executable: Path, data_dir: Path) -> bytes:
     logs = data_dir / LOG_SUBDIR
     return plistlib.dumps({
         "Label": LABEL,
-        # Global options precede the subcommand: the CLI parser rejects them after `run`.
         "ProgramArguments": [
-            str(executable), "--config", str(CONFIG_PATH),
-            "--secrets-file", str(SECRETS_PATH), "run",
+            str(executable), "run", "--config", str(CONFIG_PATH),
+            "--secrets-file", str(SECRETS_PATH),
         ],
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -111,14 +113,27 @@ def _plist(executable: Path, data_dir: Path, plist_path: Path, owner_uid: int) -
     return outcome(f"plist {plist_path}", changed)
 
 
-def _launchctl_load(runner: Runner, plist_path: Path) -> None:
+def _bootstrap(runner: Runner, plist_path: Path) -> Any:
+    return runner.run(["launchctl", "bootstrap", "system", str(plist_path)])
+
+
+def _launchctl_load(
+    runner: Runner, plist_path: Path, sleep: Callable[[float], object] = time.sleep
+) -> None:
     out = runner.run(["launchctl", "bootout", f"system/{LABEL}"])
     if out.returncode != 0:
         logger.info(
             "launchctl bootout: %s was not loaded (rc=%d): %s",
             LABEL, out.returncode, (out.stderr or "").strip(),
         )
-    result = runner.run(["launchctl", "bootstrap", "system", str(plist_path)])
+    result = _bootstrap(runner, plist_path)
+    if result.returncode == BOOTSTRAP_EIO:
+        logger.warning(
+            "launchctl bootstrap returned %d (%s); retrying once in %.0f s",
+            BOOTSTRAP_EIO, (result.stderr or "").strip(), BOOTSTRAP_RETRY_DELAY_SECONDS,
+        )
+        sleep(BOOTSTRAP_RETRY_DELAY_SECONDS)
+        result = _bootstrap(runner, plist_path)
     if result.returncode != 0:
         raise InstallError(
             f"launchctl bootstrap system {plist_path} failed (rc={result.returncode}): "
@@ -135,6 +150,7 @@ def install(
     owner_uid: int = 0,
     executable: Path | None = None,
     realpath: Callable[[str], str] = os.path.realpath,
+    sleep: Callable[[float], object] = time.sleep,
 ) -> InstallReport:
     prepared = prepare_install(
         "darwin", target, root=root, owner_uid=owner_uid, executable=executable,
@@ -146,7 +162,7 @@ def install(
         _plist(prepared.executable, prepared.config.data_dir, plist_path, owner_uid)
     )
     if start:
-        _launchctl_load(runner, plist_path)
+        _launchctl_load(runner, plist_path, sleep)
     else:
         logger.info("--no-start: %s written but not loaded; launchd loads it at boot", plist_path)
     return InstallReport(

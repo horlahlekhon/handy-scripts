@@ -368,6 +368,21 @@ def test_requires_root(env):
         run_install("linux", env.target, runner=env.runner, root=env.root, executable=env.exe)
 
 
+def test_execstart_argv_parses_with_cli(env):
+    import shlex
+
+    from credwatch.cli import build_parser
+
+    env.install()
+    line = next(
+        ln for ln in (env.root / UNIT).read_text().splitlines() if ln.startswith("ExecStart=")
+    )
+    argv = shlex.split(line.removeprefix("ExecStart="))
+    assert argv[0] == str(env.exe)
+    ns = build_parser().parse_args(argv[1:])
+    assert (ns.command, ns.config, ns.secrets_file) == ("run", "/etc/credwatch/config.yaml", None)
+
+
 def test_install_rejects_unsafe_executable_before_writing(env, monkeypatch):
     def refuse(*a, **k):
         raise InstallError("reinstall with sudo pipx install --global .")

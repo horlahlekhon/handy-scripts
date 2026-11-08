@@ -162,3 +162,18 @@ def test_trusted_dirs_overridable_and_validated(tmp_path, target):
     assert cfg.allowlist_trusted_dirs == (Path("/x"),)
     with pytest.raises(ConfigError, match="allowlist_trusted_dirs"):
         load_config(_write(tmp_path, {"allowlist_trusted_dirs": "x"}), "linux", target)
+
+
+def test_darwin_name_trust_defaults_off(tmp_path, target):
+    assert load_config(tmp_path / "none.yaml", "darwin", target).darwin_trust_name_resolution is False
+
+
+def test_darwin_name_trust_opt_in(tmp_path, target):
+    path = _write(tmp_path, {"darwin_trust_name_resolution": True})
+    assert load_config(path, "darwin", target).darwin_trust_name_resolution is True
+
+
+def test_darwin_name_trust_must_be_bool(tmp_path, target):
+    path = _write(tmp_path, {"darwin_trust_name_resolution": "yes"})
+    with pytest.raises(ConfigError, match="darwin_trust_name_resolution: must be true or false"):
+        load_config(path, "darwin", target)

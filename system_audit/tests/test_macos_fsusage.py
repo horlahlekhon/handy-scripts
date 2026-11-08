@@ -14,9 +14,11 @@ from credwatch.backends.macos_fsusage import (
     BACKEND_NAME,
     FS_USAGE_ARGV,
     STALE_OUTPUT_SECONDS,
+    MISS_LOG_INTERVAL_SECONDS,
     FsUsageHit,
     MacFsUsageBackend,
     parse_fs_usage_line,
+    parse_fs_usage_line_detail,
     resolve_pid,
 )
 from credwatch.config import load_config
@@ -150,10 +152,42 @@ def test_small_clock_skew_keeps_today(matcher):
     "line",
     ["", "garbage", "99:99:99.000000  open  F=3 (R_____)  /Users/alice/.netrc  0.1  cat.1",
      "23:59:58.1  open  F=3 (R_____)  relative/.netrc  0.1  cat.1",
-     "23:59:58.1  open  F=3 (R_____)  /Users/alice/.netrc  0.1  noTid"],
+     "23:59:58.1  open  F=3 (R_____)  /Users/alice/.netrc-old  0.1  noTid",
+     "23:59:58.1  stat64  /Users/alice/.netrc  0.1  noTid"],
 )
 def test_malformed_lines_ignored(matcher, line):
     assert _parse(line, matcher) is None
+
+
+def test_path_containing_float_token_parsed_from_the_right():
+    m = WatchMatcher([Path("/Users/alice/v 1.5 x")], case_insensitive=True)
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/v 1.5 x/creds"
+            "      0.000010   cat.4242")
+    hit = _parse(line, m)
+    assert (hit.path, hit.proc_name, hit.tid) == ("/Users/alice/v 1.5 x/creds", "cat", 4242)
+
+
+def test_process_name_longer_than_maxcomlen_falls_back_to_unknown(matcher):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc"
+            "      0.000010   averyveryverylongname.4242")
+    hit = _parse(line, matcher)
+    assert (hit.path, hit.proc_name, hit.tid) == ("/Users/alice/.netrc", "?", None)
+
+
+def test_watched_line_without_tid_still_flagged(matcher):
+    line = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   cat"
+    hit, miss = parse_fs_usage_line_detail(line, matcher, TODAY, NOW)
+    assert (hit.path, hit.proc_name, hit.tid) == ("/Users/alice/.netrc", "?", None)
+    assert miss is not None
+    bare = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/id_rsa"
+    assert _parse(bare, matcher).path == "/Users/alice/.ssh/id_rsa"
+
+
+def test_unparseable_timestamp_on_watched_path_is_a_miss(matcher):
+    line = "99:99:99.000000  open  F=3 (R_____)  /Users/alice/.netrc  0.1  cat.1"
+    assert parse_fs_usage_line_detail(line, matcher, TODAY, NOW) == (
+        None, "unparseable timestamp on a watched path",
+    )
 
 
 # --- pid resolution ---------------------------------------------------------------
@@ -301,8 +335,10 @@ class _BlockingLines:
                 self._block.wait(5)
             raise
 
+    closed = False
+
     def close(self):
-        pass
+        self.closed = True
 
 
 class Clock:
@@ -313,13 +349,13 @@ class Clock:
         return self.t
 
 
-def _backend(tmp_path, popen, mod=None, clock=None, now=NOW):
+def _backend(tmp_path, popen, mod=None, clock=None, now=NOW, trust=False):
     export = tmp_path / "audit-exports"
     export.mkdir(exist_ok=True)
     return MacFsUsageBackend(
         WATCHED, runner_popen=popen, export_dir=export,
         psutil_mod=mod or FakePsutil([FakeProc(2004211, "cat", exe="/bin/cat", ppid=42)]),
-        clock=clock or Clock(), now_fn=lambda: now,
+        clock=clock or Clock(), now_fn=lambda: now, trust_name_resolution=trust,
     )
 
 
@@ -362,6 +398,61 @@ def test_backend_unresolved_pid_has_no_exe_and_candidates_in_raw(tmp_path):
     ev = events[0]
     assert ev.pid is None and ev.exe is None and ev.ppid is None
     assert "pid candidates: 1, 2" in ev.raw
+
+
+@pytest.mark.parametrize("lines", [
+    # a CR or LF inside the process name splits the line in two (universal newlines)
+    ["23:59:58.102100  open  F=3  (R_____)  /Users/alice/.aws/credentials   0.000021   ca",
+     "t.2004211"],
+    ["23:59:58.102100  open  F=3  (R_____)  /Users/alice/.aws/credentials   0.000021   ca\r",
+     "t.2004211"],
+])
+def test_name_with_cr_or_lf_split_line_still_flagged(tmp_path, caplog, lines):
+    events = _drain(_backend(tmp_path, FakePopen(lines)))
+    assert len(events) == 1
+    ev = events[0]
+    assert (ev.path, ev.pid, ev.exe, ev.comm) == ("/Users/alice/.aws/credentials", None, None, None)
+    assert "process unknown" in ev.raw
+    assert "fs_usage parse miss" in caplog.text
+
+
+def test_watched_line_without_tid_event_has_no_exe(tmp_path):
+    line = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   cat"
+    (ev,) = _drain(_backend(tmp_path, FakePopen([line])))
+    assert ev.exe is None and ev.pid is None
+
+
+def test_parse_miss_warnings_rate_limited(tmp_path, caplog):
+    line = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   cat"
+    clock = Clock()
+    backend = _backend(tmp_path, FakePopen([line] * 3), clock=clock)
+    _drain(backend)
+    warnings = [r for r in caplog.records if "parse miss" in r.getMessage()]
+    assert len(warnings) == 1 and warnings[0].levelname == "WARNING"
+    clock.t += MISS_LOG_INTERVAL_SECONDS + 1
+    backend._popen = FakePopen([line])
+    _drain(backend)
+    warnings = [r.getMessage() for r in caplog.records if "parse miss" in r.getMessage()]
+    assert len(warnings) == 2 and "2 similar suppressed" in warnings[1]
+
+
+def test_name_only_exe_not_trusted_by_default(tmp_path):
+    mod = FakePsutil([FakeProc(5, "aws", exe="/usr/local/bin/aws", ppid=9)])
+    (ev,) = _drain(_backend(tmp_path, FakePopen([_line("open_nocancel")]), mod=mod))
+    assert (ev.pid, ev.ppid, ev.exe) == (5, 9, None)
+    assert "exe resolved by name only: /usr/local/bin/aws" in ev.raw
+
+
+def test_name_only_exe_trusted_when_opted_in(tmp_path):
+    mod = FakePsutil([FakeProc(5, "aws", exe="/usr/local/bin/aws")])
+    (ev,) = _drain(_backend(tmp_path, FakePopen([_line("open_nocancel")]), mod=mod, trust=True))
+    assert ev.exe == "/usr/local/bin/aws"
+    assert "resolved by name only" not in ev.raw
+
+
+def test_tid_pid_exe_kept_without_opt_in(tmp_path):
+    (ev,) = _drain(_backend(tmp_path, FakePopen([_line("(R_____)  /Users/alice/.aws/credentials")])))
+    assert ev.exe == "/bin/cat" and "name only" not in ev.raw
 
 
 def test_backend_exe_access_denied_gives_none(tmp_path):
@@ -489,3 +580,17 @@ def test_get_backend_darwin_returns_fsusage_backend(tmp_path):
     assert isinstance(backend, MacFsUsageBackend)
     assert backend._export_dir == cfg.data_dir / "audit-exports"
     assert backend._matcher.matches("/H/.AWS/credentials")
+    assert backend._trust_names is False
+
+
+def test_get_backend_passes_name_trust_opt_in(tmp_path):
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text("darwin_trust_name_resolution: true\n")
+    cfg = load_config(cfg_file, "darwin", TargetUser("u", 1, 1, Path("/h")))
+    assert get_backend(cfg, [], runner=SimpleNamespace())._trust_names is True
+
+
+def test_pipes_closed_after_stream(tmp_path):
+    popen = FakePopen([])
+    _drain(_backend(tmp_path, popen))
+    assert popen.stdout.closed and popen.stderr.closed
