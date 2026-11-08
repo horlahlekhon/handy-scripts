@@ -162,3 +162,12 @@ def test_digest_flagged_capped_and_unverified():
     assert "UNVERIFIED path" in body
     _, body = format_digest(_summary(1, 1), [_row(1, inode=3, canonical="/c")], [], "h")
     assert "UNVERIFIED path" not in body
+
+
+def test_lone_surrogate_escaped_and_subject_encodable():
+    bad = "/x\udcff\udc80y"
+    subject, body = _alert([_event(exe=bad, path="/p\udcab")])
+    assert subject == "[credwatch][h1] FLAGGED: /xy accessed 1 credential path(s)"
+    assert "/x\\udcff\\udc80y" in body and "/p\\udcab" in body
+    subject.encode("utf-8")
+    body.encode("utf-8")

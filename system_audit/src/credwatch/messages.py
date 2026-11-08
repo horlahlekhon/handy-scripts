@@ -13,7 +13,7 @@ from credwatch.store import DailySummary, EventRow
 SUBJECT_MAX = 200
 MAX_CONNECTIONS = 50
 MAX_DIGEST_FLAGGED = 200
-_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _NAMED_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
 UNKNOWN = "(unknown)"
 NONE = "(none)"
