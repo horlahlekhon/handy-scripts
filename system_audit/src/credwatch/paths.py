@@ -150,6 +150,14 @@ class WatchMatcher:
         normed = self._norm(path)
         return normed in self._exact or normed.startswith(self._prefixes)
 
+    @property
+    def case_insensitive(self) -> bool:
+        return self._fold
+
+    def normalized_watch_paths(self) -> tuple[str, ...]:
+        """The watched paths as matches() compares them: normpath'd, casefolded if insensitive."""
+        return tuple(sorted(self._exact))
+
 
 def write_watch_list(paths: Iterable[Path], dest: Path) -> None:
     materialized = tuple(paths)

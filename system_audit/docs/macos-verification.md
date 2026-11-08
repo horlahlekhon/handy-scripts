@@ -39,7 +39,10 @@ on macOS <version>, <date>"), and run `pytest tests/test_macos_fsusage.py`. Fix 
 parser where the real format differs from these assumptions:
 
 - columns: `HH:MM:SS.ffffff  op  F=fd|[errno]  (mode)  /path  elapsed  [W]  name.NNNN`;
-- failed calls print `[ errno]` before the path;
+- failed calls print `[ errno]` before the path. Check whether a space follows the
+  closing bracket (`[ 13]  /path` or `[ 13]/path`): make a watched file unreadable and
+  read it as your user (`chmod 000 ~/.netrc; cat ~/.netrc; chmod 600 ~/.netrc`). The
+  parser accepts both forms; record which one fs_usage uses;
 - paths with spaces are printed unquoted;
 - long process names arrive truncated to 16 characters (the parser bounds the name to
   16 characters; a longer name makes the line fall back to "process unknown", flagged);
@@ -48,10 +51,11 @@ parser where the real format differs from these assumptions:
   path and emits **one flagged event per watched path** (source and/or destination), with
   the process marked unknown, because the column split cannot be trusted. Check that a
   real rename produces these events;
-- attacker-chosen process names: a name containing a float or ` W ` can shift the column
-  split. credwatch then cross-checks the parsed path against a plain search for watched
-  paths, and on disagreement reports the watched path as a flagged "process unknown"
-  event. Confirm with a binary named like `a 1.1 b` reading a watched file;
+- attacker-chosen process names: a name containing a float, ` W `, or characters that
+  change length under casefold (`ß`, `ﬁ`, `İ`) can shift the column split. credwatch
+  cross-checks the parsed path against its own search for watched paths, and on
+  disagreement reports the watched path as a flagged "process unknown" event. Confirm
+  with binaries named like `a 1.1 b` and `ß 2.5 ssh` reading a watched file;
 - control characters in process names: run a process whose name contains a newline or CR
   (`cp /bin/cat "/tmp/a$(printf '\r')b"` and run it on a watched file). Check whether
   fs_usage escapes the character or prints it raw. A raw CR/LF splits the line; credwatch
@@ -143,12 +147,18 @@ Full Disk Access grants, then repeat. Record the actual outcome here.
     Alerts get quieter, but an attacker who can pick a process name can get allowed.
   - Ambiguous names (several live processes) and processes that have already exited
     always leave `exe` unknown. The candidate pids are recorded in `raw`.
-- **Unparseable lines fail closed.** A relevant-op line that contains a watched path at a
-  path boundary always produces an event. If its `name.tid` tail cannot be parsed, or the
-  parsed path disagrees with the watched paths found in the line, the event is recorded
-  as "process unknown" and flagged. A path holding two consecutive spaces under a watched
-  directory is reported only up to the double space. A rate-limited WARNING
-  `fs_usage parse miss` is logged.
+- **Unparseable lines fail closed.** For a relevant op (open, rename, unlink, ...),
+  credwatch searches the whole line twice: for every `/`-starting path (at the start,
+  after whitespace, or after `]`), normalised (`./`, `//`) and case-folded, and for every
+  watched path as a substring (case-folded with an offset map, so non-ASCII names cannot
+  misalign it). Any watched path found produces an event; the line is ignored only when
+  neither search finds one. The process name and tid are trusted only when the strict
+  column parse yields exactly that watched path; otherwise the event is "process unknown"
+  and flagged, and a rate-limited WARNING `fs_usage parse miss` is logged. Limits:
+  - a path printed in a form neither search recognises (relative, or glued to a preceding
+    path character) is still missed. See "Known gaps";
+  - a path under a watched directory that holds two consecutive spaces is reported only
+    up to the double space.
 - **No inode/dev.** fs_usage reports no inode, so the correlator verifies by lexical path
   (canonicalised with `realpath`) only, which is weaker than the Linux inode check.
 - **Case-insensitive matching.** APFS is case-insensitive by default, so watched paths

@@ -237,3 +237,15 @@ def test_report_has_no_skips_for_inside_home_targets(cfg, home):
     (home / ".npmrc").symlink_to(home / "dotfiles" / "npmrc")
     _, skipped = resolve_watch_paths_report(cfg)
     assert skipped == ()
+
+
+def test_watch_matcher_normalized_watch_paths_folded():
+    m = WatchMatcher([Path("/Users/Alice/.AWS/./credentials"), Path("/x//y")], case_insensitive=True)
+    assert m.case_insensitive is True
+    assert m.normalized_watch_paths() == ("/users/alice/.aws/credentials", "/x/y")
+
+
+def test_watch_matcher_normalized_watch_paths_case_sensitive():
+    m = WatchMatcher([Path("/B/c"), Path("/A")])
+    assert m.case_insensitive is False
+    assert m.normalized_watch_paths() == ("/A", "/B/c")

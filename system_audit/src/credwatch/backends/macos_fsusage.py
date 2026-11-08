@@ -80,62 +80,116 @@ def _timestamp(text: str, today: date, now: datetime) -> datetime | None:
     return local.astimezone(timezone.utc)
 
 
-def _watched_needles(matcher: WatchMatcher) -> tuple[frozenset[str], bool]:
-    """The matcher's normalised watched paths and whether they are casefolded.
-
-    WatchMatcher exposes no public accessor; reading its private fields keeps
-    the loose search and the matcher on exactly the same normalisation.
-    """
-    return matcher._exact, matcher._fold  # noqa: SLF001
+_CANDIDATE_LEFT = frozenset("]")
+_PATH_CHARS = frozenset("/._-~")
 
 
-def _extend(rest: str, start: int, end: int, matcher: WatchMatcher) -> str | None:
-    """Longest watched path starting at rest[start:end] (an occurrence of a watched path)."""
+def _normalize(path: str) -> str:
+    """normpath, plus POSIX's preserved leading '//' collapsed to '/'."""
+    normed = os.path.normpath(path)
+    return "/" + normed.lstrip("/") if normed.startswith("//") else normed
+
+
+def _watched(path: str, matcher: WatchMatcher) -> bool:
+    return matcher.matches(_normalize(path))
+
+
+def _token_end(rest: str, i: int) -> int:
     n = len(rest)
-    if end < n and not (rest[end].isspace() or rest[end] == "/"):
-        return None  # a sibling such as `.netrc-old`, not the watched path
-    best = rest[start:end]
-    e = end
-    while e < n and not rest[e].isspace():
-        e += 1
-    if matcher.matches(rest[start:e]):
-        best = rest[start:e]
-        # Cross single spaces (paths may contain them) while the result is still
-        # watched; a token starting with '/' is a second path (rename), so stop.
-        while e + 1 < n and rest[e] == " " and not rest[e + 1].isspace() and rest[e + 1] != "/":
-            f = e + 1
-            while f < n and not rest[f].isspace():
-                f += 1
-            if not matcher.matches(rest[start:f]):
-                break
-            best, e = rest[start:f], f
-    return best if matcher.matches(best) else None
+    while i < n and not rest[i].isspace():
+        i += 1
+    return i
+
+
+def _longest_watched(rest: str, start: int, first_end: int, matcher: WatchMatcher) -> int | None:
+    """End of the longest watched path starting at `start`.
+
+    Candidates are the token rest[start:first_end'] (extended to the next
+    whitespace) and its extensions across single spaces (paths may contain
+    them). A token starting with '/' begins a second path (rename): stop.
+    """
+    n = len(rest)
+    end = _token_end(rest, first_end)
+    best = end if _watched(rest[start:end], matcher) else None
+    while end + 1 < n and rest[end] == " " and not rest[end + 1].isspace() and rest[end + 1] != "/":
+        end = _token_end(rest, end + 1)
+        if _watched(rest[start:end], matcher):
+            best = end
+    return best
+
+
+def _candidate_starts(rest: str) -> list[int]:
+    """'/' positions that begin a path: at the start, or after whitespace or ']'."""
+    return [
+        i for i, ch in enumerate(rest)
+        if ch == "/" and (i == 0 or rest[i - 1].isspace() or rest[i - 1] in _CANDIDATE_LEFT)
+    ]
+
+
+def _fold_with_offsets(text: str) -> tuple[str, list[int]]:
+    """Casefold char by char; offsets[k] is the original index of folded char k."""
+    folded: list[str] = []
+    offsets: list[int] = []
+    for i, ch in enumerate(text):
+        piece = ch.casefold()
+        folded.append(piece)
+        offsets.extend([i] * len(piece))
+    offsets.append(len(text))
+    return "".join(folded), offsets
+
+
+def _needle_starts(rest: str, matcher: WatchMatcher) -> list[tuple[int, int]]:
+    """(start, end) in rest of every watched path occurring at a left path boundary."""
+    if matcher.case_insensitive:
+        haystack, offsets = _fold_with_offsets(rest)
+    else:
+        haystack, offsets = rest, list(range(len(rest) + 1))
+    found = []
+    for needle in matcher.normalized_watch_paths():
+        k = haystack.find(needle)
+        while k != -1:
+            j = k + len(needle)
+            aligned = (k == 0 or offsets[k - 1] != offsets[k]) and (
+                j == len(haystack) or offsets[j - 1] != offsets[j]
+            )
+            start, end = offsets[k], offsets[j - 1] + 1
+            left_ok = start == 0 or not (rest[start - 1].isalnum() or rest[start - 1] in _PATH_CHARS)
+            if aligned and left_ok:
+                found.append((start, end))
+            k = haystack.find(needle, k + 1)
+    return found
 
 
 def _loose_paths(rest: str, matcher: WatchMatcher) -> tuple[tuple[str, int], ...]:
-    """Every watched path occurring in rest at a path boundary: ((path, offset), ...)."""
-    needles, fold = _watched_needles(matcher)
-    haystack = rest.casefold() if fold else rest
-    if len(haystack) != len(rest):  # casefold changed lengths: offsets would not line up
-        haystack = rest
-    found: dict[str, int] = {}
-    for needle in needles:
-        i = haystack.find(needle)
-        while i != -1:
-            if i == 0 or rest[i - 1].isspace():
-                path = _extend(rest, i, i + len(needle), matcher)
-                if path is not None:
-                    found.setdefault(path, i)
-            i = haystack.find(needle, i + 1)
-    # Drop paths that are strict prefixes of another found path at the same offset.
-    kept = {
-        p: i for p, i in found.items()
-        if not any(q != p and j == i and q.startswith(p) for q, j in found.items())
-    }
-    return tuple(sorted(kept.items(), key=lambda item: (item[1], item[0])))
+    """Every watched path in rest as (normalized path, start offset), one per start.
+
+    Two independent searches: '/'-starting candidates (handles ./, //, `[ 2]/x`)
+    and watched-path needles (casefolded with an offset map, so names that
+    change length under casefold cannot misalign the search).
+    """
+    spans: dict[int, int] = {}
+    for start in _candidate_starts(rest):
+        end = _longest_watched(rest, start, start + 1, matcher)
+        if end is not None:
+            spans[start] = max(end, spans.get(start, end))
+    for start, end in _needle_starts(rest, matcher):
+        if end < len(rest) and not (rest[end].isspace() or rest[end] == "/"):
+            continue  # a sibling such as `.netrc-old`
+        longest = _longest_watched(rest, start, end, matcher)
+        if longest is not None:
+            spans[start] = max(longest, spans.get(start, longest))
+    seen: set[str] = set()
+    out = []
+    for start in sorted(spans):
+        path = _normalize(rest[start:spans[start]])
+        key = path.casefold() if matcher.case_insensitive else path
+        if key not in seen:
+            seen.add(key)
+            out.append((path, start))
+    return tuple(out)
 
 
-def _strict(rest: str, matcher: WatchMatcher) -> tuple[str, str, int, int] | None:
+def _strict(rest: str) -> tuple[str, str, int, int] | None:
     """(path, proc_name, tid, path offset) from the right-anchored tail, if it parses."""
     tail = _TAIL.match(rest)
     if tail is None:
@@ -151,40 +205,40 @@ def parse_fs_usage_hits(
 ) -> tuple[tuple[FsUsageHit, ...], str | None]:
     """(hits, miss) for one fs_usage line; one hit per distinct watched path.
 
-    Invariant: a relevant-op line in which a watched path occurs at a path
-    boundary always yields at least one hit. The strict parse (path, name.tid)
-    is used only when its path agrees with the watched paths found by a plain
-    search of the line; otherwise every found path is reported with
-    proc_name=UNKNOWN_PROC and tid=None (flagged), and `miss` says why.
+    Invariant: ((), None) only when no candidate path and no watched-path
+    needle in the line is watched. The strict parse (path, name.tid) is used
+    only when its path is watched AND is exactly the single watched path the
+    loose search found at the same place; otherwise every found path is
+    reported with proc_name=UNKNOWN_PROC, tid=None (flagged), and `miss` says why.
     """
     text = line.rstrip("\r\n")
     head = _HEAD.match(text)
     if head is None or head.group("op") not in RELEVANT_OPS:
         return (), None
     rest = head.group("rest")
-    strict = _strict(rest, matcher)
+    strict = _strict(rest)
     loose = _loose_paths(rest, matcher)
-    loose_paths = {p for p, _ in loose}
+    if not loose:
+        return (), None  # no watched path anywhere in the line
     miss: str | None = None
-    if strict is not None and matcher.matches(strict[0]) and loose_paths <= {strict[0]}:
-        path, proc, tid, offset = strict
-        located: tuple[tuple[str, int], ...] = ((path, offset),)
-    elif loose:
-        proc, tid, located = UNKNOWN_PROC, None, loose
+    agrees = (
+        strict is not None and len(loose) == 1 and loose[0][1] == strict[3]
+        and _watched(strict[0], matcher) and _normalize(strict[0]) == loose[0][0]
+    )
+    if agrees:
+        _, proc, tid, _ = strict
+    else:
+        proc, tid = UNKNOWN_PROC, None
         miss = (
             "name.tid tail split disagrees with the watched path(s); flagged"
             if strict is not None else "unparseable name.tid tail; flagged"
         )
-    elif strict is not None:
-        return (), None  # fully parsed; no watched path on this line
-    else:
-        return (), "relevant op with unparseable tail and no watched path"
     timestamp = _timestamp(head.group("ts"), today, now)
     if timestamp is None:
         timestamp = now.astimezone(timezone.utc)
         miss = "unparseable timestamp; used read time"
     hits = []
-    for path, offset in located:
+    for path, offset in loose:
         err = _ERRNO.search(rest[:offset])
         hits.append(FsUsageHit(
             timestamp=timestamp, op=head.group("op"), path=path, proc_name=proc, tid=tid,

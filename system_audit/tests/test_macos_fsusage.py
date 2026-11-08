@@ -1,5 +1,6 @@
 import collections
 import io
+import os
 import random
 import string
 import stat
@@ -268,30 +269,52 @@ def test_watched_path_inside_longer_path_not_reported(matcher):
     assert _hits(line, matcher) == ((), None)
 
 
-_NAME_ALPHABET = string.ascii_letters + string.digits + string.punctuation + "      ."
-_NAME_PIECES = (" W ", " 0.5 ", " 1.000010 ", "..", ".123", " ", "W", "9.9")
+_NAME_ALPHABET = (
+    string.ascii_letters + string.digits + string.punctuation + "      ./]"
+    + "ßﬁİŉǰéü"
+)
+_NAME_PIECES = (" W ", " 0.5 ", " 1.000010 ", "..", ".123", " ", "W", "9.9", "[ 2]", "/", "ßß")
+_TARGETS = (
+    "/Users/alice/.netrc", "/Users/alice/.aws/credentials", "/Users/alice/.ssh/id_x",
+    "/Library/Application Support/credwatch/canary", "/Users/alice/.ssh/a b",
+)
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
+def _variant(rng, path):
+    """A path that normalizes to `path`: ./ segments, doubled slashes, case changes."""
+    parts = path.split("/")[1:]
+    out = []
+    for part in parts:
+        if rng.random() < 0.2:
+            out.append(".")
+        out.append("".join(c.upper() if rng.random() < 0.3 else c for c in part))
+    sep = lambda: "//" if rng.random() < 0.15 else "/"  # noqa: E731
+    return "".join(sep() + p for p in out)
+
+
+def _key(path):
+    return os.path.normpath("/" + path.lstrip("/")).casefold()
+
+
+@pytest.mark.parametrize("seed", range(5))
 def test_random_attacker_names_never_hide_watched_path(matcher, seed):
     rng = random.Random(seed)
-    targets = [
-        "/Users/alice/.netrc", "/Users/alice/.aws/credentials", "/Users/alice/.ssh/id_x",
-        "/Library/Application Support/credwatch/canary", "/Users/alice/.ssh/a b",
-    ]
     for _ in range(500):
-        target = rng.choice(targets)
+        target = rng.choice(_TARGETS)
+        printed = _variant(rng, target)
         name = "".join(
             rng.choice(_NAME_PIECES) if rng.random() < 0.3 else rng.choice(_NAME_ALPHABET)
             for _ in range(rng.randint(1, 24))
         )
         op = rng.choice(sorted(RELEVANT_OPS))
         gap = " " * rng.randint(2, 8)
-        line = f"23:59:58.{rng.randint(0, 999999):06d}  {op}  F=3  (R_____)  {target}{gap}0.000010   {name}.{rng.randint(1, 10**7)}"
+        lead = rng.choice(["F=3  (R_____)  ", "[  2]  (R_____)  ", "[ 2]", "  "])
+        tid = rng.choice([f".{rng.randint(1, 10**7)}", ""])
+        line = f"23:59:58.{rng.randint(0, 999999):06d}  {op}  {lead}{printed}{gap}0.000010   {name}{tid}"
         hits, _ = _hits(line, matcher)
         assert hits, line
         assert all(matcher.matches(h.path) for h in hits), line
-        assert target in {h.path for h in hits}, line
+        assert _key(target) in {_key(h.path) for h in hits}, line
 
 
 # --- pid resolution ---------------------------------------------------------------
@@ -708,12 +731,70 @@ def test_loose_extension_stops_when_no_longer_watched(matcher):
     assert "disagrees" in miss
 
 
-def test_casefold_length_change_still_finds_path(matcher):
+@pytest.mark.parametrize("ch", ["ß", "ﬁ", "İ"])
+def test_casefold_length_change_in_name_with_clean_tail(matcher, ch):
+    # The name changes length under casefold; the folded search must still align.
     line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc"
-            "      0.000010   straße.42")
+            f"      0.000010   stra{ch}e.42")
     hits, miss = _hits(line, matcher)
-    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.netrc", "straße", 42)]
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.netrc", f"stra{ch}e", 42)]
     assert miss is None
+
+
+@pytest.mark.parametrize("ch", ["ß", "ﬁ", "İ"])
+def test_casefold_length_change_with_float_in_name_flagged(matcher, ch):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc"
+            f"      0.000010   a 1.1 stra{ch}e.42")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.netrc", "?", None)]
+    assert miss is not None
+
+
+@pytest.mark.parametrize("ch", ["ß", "ﬁ", "İ"])
+def test_casefold_length_change_dir_watch_not_attributed(matcher, ch):
+    line = ("23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/id_rsa"
+            f"      0.000010   {ch} 2.5 ssh.42")
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [("/Users/alice/.ssh/id_rsa", "?", None)]
+    assert "disagrees" in miss
+
+
+@pytest.mark.parametrize("ch", ["ß", "ﬁ", "İ"])
+def test_casefold_length_change_without_tid_flagged(matcher, ch):
+    line = f"23:59:58.100000  open  F=3  (R_____)  /Users/alice/.netrc      0.000010   {ch}x"
+    hits, _ = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.netrc", "?")]
+
+
+def test_non_ascii_before_path_keeps_offsets(matcher):
+    # Folded text is longer than the original before the path: offsets must map back.
+    line = ("23:59:58.100000  open  F=3 ßßﬁİ (R_____)  /USERS/alice/.NETRC"
+            "      0.000010   cat.42")
+    hits, _ = _hits(line, matcher)
+    assert [h.path for h in hits] == ["/USERS/alice/.NETRC"]
+
+
+@pytest.mark.parametrize("printed,expected", [
+    ("/Users/alice/.aws/./credentials", "/Users/alice/.aws/credentials"),
+    ("//Users/alice/.netrc", "/Users/alice/.netrc"),
+    ("/Users/alice//.ssh/id_rsa", "/Users/alice/.ssh/id_rsa"),
+])
+def test_path_variants_normalized_and_matched(matcher, printed, expected):
+    line = f"23:59:58.100000  open  F=3  (R_____)  {printed}      0.000010   cat.42"
+    hits, _ = _hits(line, matcher)
+    assert [h.path for h in hits] == [expected]
+
+
+def test_errno_bracket_without_space_before_path(matcher):
+    line = "23:59:58.100000  open  [  2]/Users/alice/.netrc      0.000010   cat.42"
+    hits, _ = _hits(line, matcher)
+    assert [(h.path, h.errno) for h in hits] == [("/Users/alice/.netrc", 2)]
+
+
+def test_watched_path_glued_after_mode_found_by_needle(matcher):
+    line = "23:59:58.100000  open  F=3  (R_____)/Users/alice/.netrc      0.000010   cat.42"
+    hits, _ = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.netrc", "?")]
 
 
 def test_stderr_closed_during_teardown_is_not_a_warning(caplog):
@@ -730,3 +811,11 @@ def test_stderr_closed_during_teardown_is_not_a_warning(caplog):
     _drain_stderr(SimpleNamespace(stderr=Closed()), collections.deque(),
                   threading.Event())
     assert "could not read fs_usage stderr" in caplog.text
+
+
+def test_case_sensitive_matcher_needle_search():
+    m = WatchMatcher([Path("/Users/alice/.netrc")])
+    glued = "23:59:58.100000  open  F=3  (R_____)/Users/alice/.netrc      0.000010   cat.42"
+    assert [h.path for h in _hits(glued, m)[0]] == ["/Users/alice/.netrc"]
+    other_case = "23:59:58.100000  open  F=3  (R_____)/USERS/alice/.netrc      0.000010   cat.42"
+    assert _hits(other_case, m) == ((), None)
