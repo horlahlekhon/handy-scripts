@@ -356,6 +356,42 @@ def test_second_backend_crash_after_recovery_is_alerted(config, store):
     assert len(alerts) == 2
 
 
+def test_backend_entry_cleared_after_restart(config, store):
+    dispatcher = FakeDispatcher()
+
+    def alerts():
+        return [b for b in dispatcher.bodies("DEGRADED") if "RuntimeError: x" in b]
+
+    first = FakeBackend(runs=[[RuntimeError("x")], []])
+    with Harness(make_daemon(config, store, backend=first, dispatcher=dispatcher)) as h:
+        h.settle()
+    assert len(alerts()) == 1
+    assert "backend" in json.loads(store.get_meta("health_alert_state"))
+
+    # New process, same store, within 6 h: first event clears, the repeat crash re-alerts.
+    second = FakeBackend(runs=[[ev(), RuntimeError("x")], []])
+    with Harness(make_daemon(config, store, backend=second, dispatcher=dispatcher)) as h:
+        h.settle()
+    assert len(alerts()) == 2
+
+
+def test_digest_day_meta_read_failure_seeds_once(config, store, monkeypatch, caplog):
+    def broken_get_meta(key):
+        if key == "last_digest_day":
+            raise sqlite3.OperationalError("database is locked")
+        return None
+
+    monkeypatch.setattr(store, "get_meta", broken_get_meta)
+    clock = FakeClock(datetime(2026, 11, 8, 9, 0, tzinfo=UTC).timestamp())
+    dispatcher = FakeDispatcher()
+    with caplog.at_level(logging.ERROR, logger="credwatch.daemon"), \
+            Harness(make_daemon(config, store, dispatcher=dispatcher, clock=clock)) as h:
+        h.step(5)
+
+    assert len([r for r in caplog.records if "last_digest_day" in r.getMessage()]) == 1
+    assert len(dispatcher.subjects("Daily digest")) == 1
+
+
 def test_backend_stream_ending_is_restarted(config, store):
     sleeps: list[float] = []
     backend = FakeBackend(runs=[[ev()], [ev()]])
@@ -547,15 +583,17 @@ def test_dead_reader_thread_is_a_health_problem(config, store):
     assert "backend reader thread not running" in dispatcher.bodies("DEGRADED")[0]
 
 
-def test_queue_backlog_warning_is_rate_limited(config, store, caplog, monkeypatch):
+def test_queue_backlog_warning_runs_every_tick_rate_limited(config, store, caplog, monkeypatch):
     clock = FakeClock()
     d = make_daemon(config, store, clock=clock)
     monkeypatch.setattr(d._queue, "qsize", lambda: daemon_mod.QUEUE_BACKLOG_WARN + 1)
 
-    with caplog.at_level(logging.WARNING, logger="credwatch.daemon"):
-        d._check_health(clock())
-        d._check_health(clock() + 30)
-        d._check_health(clock() + daemon_mod.QUEUE_BACKLOG_WARN_INTERVAL_SECONDS)
+    with caplog.at_level(logging.WARNING, logger="credwatch.daemon"), Harness(d) as h:
+        h.step()
+        clock.advance(30)  # no health job due: warning still checked, but rate-limited
+        h.step()
+        clock.advance(daemon_mod.QUEUE_BACKLOG_WARN_INTERVAL_SECONDS - 30)
+        h.step()
 
     assert len([r for r in caplog.records if "backlog" in r.getMessage()]) == 2
 

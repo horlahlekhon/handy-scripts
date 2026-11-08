@@ -250,7 +250,9 @@ class Daemon:
 
     def _read_events(self, stop: threading.Event, sleep: Callable[[float], object]) -> None:
         delay = BACKEND_BACKOFF_BASE_SECONDS
-        failed = False
+        # True at start: the first event of each process clears a `backend` problem
+        # persisted by a previous process.
+        failed = True
         while not stop.is_set():
             produced = False
             try:
@@ -299,6 +301,7 @@ class Daemon:
             for batch in self._coalescer.drain_due(now):
                 self._guarded("flagged alert", lambda b=batch: self._submit_flagged(b))
         self._guarded("canary check", lambda: self._check_canary_deadline(now))
+        self._guarded("backlog check", lambda: self._warn_on_backlog(now))
         if self._canary_not_before is None and self._backend_entered.is_set():
             self._canary_not_before = now + CANARY_STARTUP_DELAY_SECONDS
         jobs = [
@@ -379,7 +382,6 @@ class Daemon:
             except Exception as exc:
                 logger.exception("capture status check failed")
                 problems.append(f"capture status check failed: {type(exc).__name__}: {exc}")
-        self._warn_on_backlog(now)
         self._health_problems = tuple(problems)
         if problems:
             logger.warning("health problems: %s", "; ".join(problems))
@@ -475,7 +477,12 @@ class Daemon:
             return
         today = local_now.date()
         if self._digest_day is None:
-            self._digest_day = self._store.get_meta(META_DIGEST_DAY) or ""
+            try:
+                self._digest_day = self._store.get_meta(META_DIGEST_DAY) or ""
+            except Exception:
+                logger.exception("could not read %s meta; assuming no digest sent today",
+                                 META_DIGEST_DAY)
+                self._digest_day = ""
         if self._digest_day == today.isoformat():
             return
         # Mark first: a broken store must not make every later tick resend (or retry) it.
