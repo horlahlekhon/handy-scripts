@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import unicodedata
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -143,8 +144,13 @@ class WatchMatcher:
         self._prefixes = tuple(n.rstrip(os.sep) + os.sep for n in normalized)
 
     def _norm(self, path: str) -> str:
-        normed = os.path.normpath(path)
-        return normed.casefold() if self._fold else normed
+        """NFC + normpath, then casefold (re-NFC'd) if insensitive.
+
+        NFC: APFS treats NFC and NFD spellings of a name as the same file, and NFC
+        only merges canonically equivalent spellings, so ASCII paths are unaffected.
+        """
+        normed = unicodedata.normalize("NFC", os.path.normpath(path))
+        return unicodedata.normalize("NFC", normed.casefold()) if self._fold else normed
 
     def matches(self, path: str) -> bool:
         normed = self._norm(path)
@@ -155,7 +161,7 @@ class WatchMatcher:
         return self._fold
 
     def normalized_watch_paths(self) -> tuple[str, ...]:
-        """The watched paths as matches() compares them: normpath'd, casefolded if insensitive."""
+        """The watched paths as matches() compares them: normpath'd, NFC, casefolded if insensitive."""
         return tuple(sorted(self._exact))
 
 

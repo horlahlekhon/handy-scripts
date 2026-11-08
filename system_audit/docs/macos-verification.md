@@ -5,12 +5,25 @@ built on Linux against a hand-written fixture (`tests/fixtures/fs_usage_sample.t
 fakes. Each step below is for a human on a Mac. Record what actually happens, and fix
 the code or this file where reality differs.
 
+**What has been verified, and how.** Every parser and pipeline claim in this file is
+covered by unit tests on Linux (`tests/test_macos_fsusage.py`) against the hand-written
+fixture and synthetic lines. The daemon-path claims (prefilter → parser → events →
+export) are tested by feeding lines through `MacFsUsageBackend.events()` with a fake
+`Popen`, including a randomized test of attacker-chosen process names and path
+spellings (`./`, `//`, `x/..`, case, NFD). **Not verified:** the real fs_usage column
+layout and spacing, how it prints errno, renames, control characters and non-ASCII
+names, tid vs pid, backpressure, and anything involving launchd, TCC or tcpdump. Those
+are the checks below.
+
 ## Known gaps (read first)
 
 The fs_usage backend is a stop-gap and much weaker than the Linux auditd backend:
 
 - **Matching is lexical.** An access is caught only when fs_usage prints a path that
-  string-matches a watched path, case-insensitively.
+  matches a watched path after lexical normalisation: `./` and `x/..` segments and
+  repeated slashes are removed (`os.path.normpath`, plus a leading `//`), the text is
+  Unicode-normalised to NFC (APFS treats NFC and NFD spellings as one name), and case is
+  ignored. Nothing is resolved on disk at this stage.
 - **Aliases are not detected.** Relative-path opens (`cd ~/.aws && cat credentials`, if
   fs_usage prints the relative name), symlink aliases (`ln -s ~/.aws/credentials /tmp/x`)
   and hard links (`ln ~/.aws/credentials /tmp/x; cat /tmp/x`) all read the secret under a
@@ -46,6 +59,19 @@ parser where the real format differs from these assumptions:
 - paths with spaces are printed unquoted;
 - long process names arrive truncated to 16 characters (the parser bounds the name to
   16 characters; a longer name makes the line fall back to "process unknown", flagged);
+- the separator between the path and the elapsed-time column is **always at least two
+  spaces**. This matters for attribution (see "Single-space ambiguity" below). Check it
+  on the whole capture, including a very long path, which is where a padded column would
+  shrink:
+
+  ```bash
+  cat "$HOME/$(printf './%.0s' $(seq 60)).netrc" > /dev/null   # long path to a watched file
+  grep -nE '[^ ] [0-9]+\.[0-9]+( W)? +.*\.[0-9]+ *$' /tmp/fs.txt | head
+  ```
+
+  The grep lists lines where only one space precedes the elapsed column. It should print
+  nothing (a path that itself contains ` <float> ` can show up; inspect any hit). If real
+  lines appear, record it here: the single-space ambiguity is then real on your macOS;
 - `rename`/`renameat` print one path or two (old and new). Rename a watched file and look
   at the line. Two-path lines are handled: credwatch searches the line for every watched
   path and emits **one flagged event per watched path** (source and/or destination), with
@@ -147,22 +173,43 @@ Full Disk Access grants, then repeat. Record the actual outcome here.
     Alerts get quieter, but an attacker who can pick a process name can get allowed.
   - Ambiguous names (several live processes) and processes that have already exited
     always leave `exe` unknown. The candidate pids are recorded in `raw`.
+- **Prefilter.** fs_usage output is high-volume, so the daemon first drops every line
+  that does not contain, after NFC and case-folding, the final component of some watched
+  path (`.netrc`, `credentials`, `.ssh`, ...; for a watched directory its own name). Any
+  spelling the parser below accepts (`./`, `//`, `x/..`, case, NFD) still contains that
+  component, so the prefilter never drops a line the parser would report. Common names
+  such as `config` let many unrelated lines through to the full parse; that costs CPU,
+  not correctness (see "Backpressure").
 - **Unparseable lines fail closed.** For a relevant op (open, rename, unlink, ...),
-  credwatch searches the whole line twice: for every `/`-starting path (at the start,
-  after whitespace, or after `]`), normalised (`./`, `//`) and case-folded, and for every
-  watched path as a substring (case-folded with an offset map, so non-ASCII names cannot
-  misalign it). Any watched path found produces an event; the line is ignored only when
-  neither search finds one. The process name and tid are trusted only when the strict
-  column parse yields exactly that watched path; otherwise the event is "process unknown"
-  and flagged, and a rate-limited WARNING `fs_usage parse miss` is logged. Limits:
+  credwatch NFC-normalises the line and searches it twice: for every `/`-starting path (at
+  the start, after whitespace, or after `]`), normalised (`./`, `//`, `x/..`) and
+  case-folded, and for every watched path as a substring (case-folded with an offset map,
+  so non-ASCII names cannot misalign it). Any watched path found produces an event; the
+  line is ignored only when neither search finds one. The process name and tid are
+  trusted only when the strict column parse yields exactly that watched path; otherwise
+  the event is "process unknown" and flagged, and a rate-limited WARNING
+  `fs_usage parse miss` is logged. Limits:
   - a path printed in a form neither search recognises (relative, or glued to a preceding
     path character) is still missed. See "Known gaps";
   - a path under a watched directory that holds two consecutive spaces is reported only
-    up to the double space.
+    up to the double space;
+  - **single-space ambiguity.** The cross-check extends a path across single spaces
+    (paths may contain them) and stops at two. If fs_usage ever puts only one space
+    between a path under a watched directory and the elapsed column, a process named
+    `1.5 ssh` reading `~/.ssh/id` prints `.../.ssh/id 0.000010   1.5 ssh.42`, which is
+    indistinguishable from `ssh` reading a file named `id 0.000010`. Both searches agree
+    on that path, so the access is attributed to `ssh` (with a wrong path) instead of
+    being flagged as "process unknown". It is still reported as an event, and `exe` is
+    still unknown unless the tid is the pid or name trust is enabled. Exact watched files
+    (not directories) are not affected. The step-1 spacing check decides whether this
+    matters in practice. `test_single_space_before_elapsed_is_ambiguous_under_watched_dir`
+    pins the behaviour.
 - **No inode/dev.** fs_usage reports no inode, so the correlator verifies by lexical path
   (canonicalised with `realpath`) only, which is weaker than the Linux inode check.
 - **Case-insensitive matching.** APFS is case-insensitive by default, so watched paths
-  match case-insensitively. The reported path keeps the caller's spelling. An access via
+  match case-insensitively. The reported path keeps the caller's case but is lexically
+  normalised (`./`, `//`, `x/..` removed) and in NFC form; the event's `raw` and the
+  export keep the line exactly as fs_usage printed it. An access via
   `~/.AWS/Credentials` is caught but does not match the lower-case allowlist patterns, so
   it is flagged.
 - **`status` backend health.** fs_usage runs inside the daemon, so the `status` command

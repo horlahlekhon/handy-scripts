@@ -5,6 +5,7 @@ import random
 import string
 import stat
 import threading
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +43,9 @@ WATCHED = (
     Path("/Users/alice/.kube/config"),
     Path("/Users/alice/.docker/config.json"),
     Path("/Library/Application Support/credwatch/canary"),
+    Path(unicodedata.normalize("NFC", "/Users/josé/.netrc")),
 )
+JOSE_NETRC = unicodedata.normalize("NFC", "/Users/josé/.netrc")
 
 
 def _lines() -> list[str]:
@@ -273,33 +276,41 @@ _NAME_ALPHABET = (
     string.ascii_letters + string.digits + string.punctuation + "      ./]"
     + "ßﬁİŉǰéü"
 )
-_NAME_PIECES = (" W ", " 0.5 ", " 1.000010 ", "..", ".123", " ", "W", "9.9", "[ 2]", "/", "ßß")
+_NAME_PIECES = (
+    " W ", " 0.5 ", " 1.000010 ", "..", ".123", " ", "W", "9.9", "[ 2]", "/", "ßß",
+    "e\u0301", "\u0301", unicodedata.normalize("NFD", "É"),
+)
 _TARGETS = (
     "/Users/alice/.netrc", "/Users/alice/.aws/credentials", "/Users/alice/.ssh/id_x",
-    "/Library/Application Support/credwatch/canary", "/Users/alice/.ssh/a b",
+    "/Library/Application Support/credwatch/canary", "/Users/alice/.ssh/a b", JOSE_NETRC,
 )
 
 
 def _variant(rng, path):
-    """A path that normalizes to `path`: ./ segments, doubled slashes, case changes."""
+    """A path that normalizes to `path`: ./ and x/.. segments, doubled slashes,
+    case changes, NFD spellings."""
     parts = path.split("/")[1:]
     out = []
     for part in parts:
         if rng.random() < 0.2:
             out.append(".")
-        out.append("".join(c.upper() if rng.random() < 0.3 else c for c in part))
+        if rng.random() < 0.1:
+            out.extend(("bob", ".."))
+        cased = "".join(c.upper() if rng.random() < 0.3 else c for c in part)
+        out.append(unicodedata.normalize("NFD", cased) if rng.random() < 0.3 else cased)
     sep = lambda: "//" if rng.random() < 0.15 else "/"  # noqa: E731
     return "".join(sep() + p for p in out)
 
 
 def _key(path):
-    return os.path.normpath("/" + path.lstrip("/")).casefold()
+    nfc = unicodedata.normalize("NFC", os.path.normpath("/" + path.lstrip("/")))
+    return unicodedata.normalize("NFC", nfc.casefold())
 
 
-@pytest.mark.parametrize("seed", range(5))
-def test_random_attacker_names_never_hide_watched_path(matcher, seed):
+def _random_lines(seed, count=500):
+    """(line, target) pairs: a relevant op on a watched target, attacker-chosen name."""
     rng = random.Random(seed)
-    for _ in range(500):
+    for _ in range(count):
         target = rng.choice(_TARGETS)
         printed = _variant(rng, target)
         name = "".join(
@@ -311,10 +322,17 @@ def test_random_attacker_names_never_hide_watched_path(matcher, seed):
         lead = rng.choice(["F=3  (R_____)  ", "[  2]  (R_____)  ", "[ 2]", "  "])
         tid = rng.choice([f".{rng.randint(1, 10**7)}", ""])
         line = f"23:59:58.{rng.randint(0, 999999):06d}  {op}  {lead}{printed}{gap}0.000010   {name}{tid}"
+        yield line, target
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_random_attacker_names_never_hide_watched_path(matcher, seed):
+    for line, target in _random_lines(seed):
         hits, _ = _hits(line, matcher)
         assert hits, line
         assert all(matcher.matches(h.path) for h in hits), line
         assert _key(target) in {_key(h.path) for h in hits}, line
+        assert all(h.raw == line for h in hits), line
 
 
 # --- pid resolution ---------------------------------------------------------------
@@ -819,3 +837,98 @@ def test_case_sensitive_matcher_needle_search():
     assert [h.path for h in _hits(glued, m)[0]] == ["/Users/alice/.netrc"]
     other_case = "23:59:58.100000  open  F=3  (R_____)/USERS/alice/.netrc      0.000010   cat.42"
     assert _hits(other_case, m) == ((), None)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_random_attacker_names_never_hidden_by_backend_prefilter(tmp_path, matcher, seed):
+    """Same generator, pushed through the real stream: prefilter + parse + events."""
+    pairs = list(_random_lines(seed))
+    events = _drain(_backend(tmp_path, FakePopen([line for line, _ in pairs])))
+    by_line = collections.defaultdict(set)
+    for ev in events:
+        by_line[ev.raw.split("\n")[0]].add(_key(ev.path))
+        assert matcher.matches(ev.path), ev.raw
+    for line, target in pairs:
+        assert _key(target) in by_line[line], line
+
+
+# --- fix round 4: prefilter keys, NFC, `]` path start, single-space ambiguity ----------
+
+
+_TAIL_OK = "      0.000010   cat.42"
+
+
+@pytest.mark.parametrize("printed,expected", [
+    ("/Users/alice/./.netrc", "/Users/alice/.netrc"),
+    ("//Users//alice/.netrc", "/Users/alice/.netrc"),
+    ("/Users/alice/./.aws/credentials", "/Users/alice/.aws/credentials"),
+    ("/Users/bob/../alice/.ssh/id", "/Users/alice/.ssh/id"),
+    ("/USERS/alice/.SSH/./id", "/USERS/alice/.SSH/id"),
+    (unicodedata.normalize("NFD", JOSE_NETRC), JOSE_NETRC),
+    (unicodedata.normalize("NFD", "/Users/JOSÉ/./.NETRC"), "/Users/JOSÉ/.NETRC"),
+])
+@pytest.mark.parametrize("tail", [_TAIL_OK, "      0.000010   a 1.1 cat.42"])
+def test_backend_path_variants_survive_prefilter(tmp_path, printed, expected, tail):
+    line = f"23:59:58.100000  open  F=3  (R_____)  {printed}{tail}"
+    backend = _backend(tmp_path, FakePopen([line]))
+    events = _drain(backend)
+    assert [(ev.path, ev.exe) for ev in events] == [(expected, None)]  # exe unknown: flagged
+    assert events[0].raw.split("\n")[0] == line  # original spelling kept as evidence
+    export = (tmp_path / "audit-exports" / "fs_usage-20261108.log").read_text("utf-8")
+    assert export == line + "\n"
+
+
+def test_prefilter_still_drops_unrelated_lines(tmp_path):
+    backend = _backend(tmp_path, FakePopen([]))
+    assert not backend._prefiltered(_line("/usr/lib/libSystem.B.dylib"))
+    assert not backend._prefiltered(_line("/Users/alice/Documents/notes.txt"))
+    assert backend._prefiltered("x  open  /Users/bob/../alice/.SSH/id  0.1  cat.1")
+
+
+def test_prefilter_keys_are_watched_final_components(tmp_path):
+    backend = _backend(tmp_path, FakePopen([]))
+    assert set(backend._prefilter) == {
+        "credentials", "config", ".ssh", ".netrc", "config.json", "canary",
+    }
+
+
+def test_nfd_line_matches_nfc_watched_path(matcher):
+    nfd = unicodedata.normalize("NFD", JOSE_NETRC)
+    line = f"23:59:58.100000  open  F=3  (R_____)  {nfd}{_TAIL_OK}"
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid) for h in hits] == [(JOSE_NETRC, "cat", 42)]
+    assert hits[0].raw == line
+    assert miss is None
+
+
+def test_nfd_line_through_backend_gives_event(tmp_path):
+    nfd = unicodedata.normalize("NFD", JOSE_NETRC)
+    line = f"23:59:58.100000  open  F=3  (R_____)  {nfd}{_TAIL_OK}"
+    (ev,) = _drain(_backend(tmp_path, FakePopen([line])))
+    assert ev.path == JOSE_NETRC and ev.comm == "cat"
+    assert ev.raw.split("\n")[0] == line
+
+
+def test_errno_bracket_glued_path_parsed_strictly(matcher):
+    line = f"23:59:58.100000  open  [  2]/Users/alice/.netrc{_TAIL_OK}"
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name, h.tid, h.errno) for h in hits] == [
+        ("/Users/alice/.netrc", "cat", 42, 2)
+    ]
+    assert miss is None
+
+
+def test_single_space_before_elapsed_is_ambiguous_under_watched_dir(matcher):
+    """Documented limit (runbook): safety relies on >= 2 spaces before the elapsed column.
+
+    With one space, a process named `1.5 ssh` reading ~/.ssh/id cannot be told apart
+    from `ssh` reading a file named `id 0.000010`, so it is attributed. With two
+    spaces the split disagrees with the watched-path search and is flagged.
+    """
+    one = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/id 0.000010   1.5 ssh.42"
+    hits, _ = _hits(one, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.ssh/id 0.000010", "ssh")]
+    two = "23:59:58.100000  open  F=3  (R_____)  /Users/alice/.ssh/id  0.000010  1.5 ssh.42"
+    hits, miss = _hits(two, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/alice/.ssh/id", "?")]
+    assert "disagrees" in miss

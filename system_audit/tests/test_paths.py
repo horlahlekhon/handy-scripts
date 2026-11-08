@@ -1,6 +1,7 @@
 import logging
 import os
 import stat
+import unicodedata
 from dataclasses import replace
 from pathlib import Path
 
@@ -249,3 +250,27 @@ def test_watch_matcher_normalized_watch_paths_case_sensitive():
     m = WatchMatcher([Path("/B/c"), Path("/A")])
     assert m.case_insensitive is False
     assert m.normalized_watch_paths() == ("/A", "/B/c")
+
+
+_NFC = unicodedata.normalize("NFC", "/Users/josé/.netrc")
+_NFD = unicodedata.normalize("NFD", _NFC)
+
+
+@pytest.mark.parametrize("fold", [False, True])
+def test_watch_matcher_nfc_and_nfd_spellings_match(fold):
+    assert _NFC != _NFD
+    for watched, accessed in ((_NFC, _NFD), (_NFD, _NFC), (_NFC, _NFD + "/x")):
+        assert WatchMatcher([Path(watched)], case_insensitive=fold).matches(accessed)
+
+
+def test_watch_matcher_nfd_uppercase_matches_case_insensitively():
+    upper = unicodedata.normalize("NFD", "/USERS/JOSÉ/.NETRC")
+    assert WatchMatcher([Path(_NFC)], case_insensitive=True).matches(upper)
+    assert not WatchMatcher([Path(_NFC)]).matches(upper)
+
+
+@pytest.mark.parametrize("fold", [False, True])
+def test_watch_matcher_normalized_watch_paths_are_nfc(fold):
+    (path,) = WatchMatcher([Path(_NFD)], case_insensitive=fold).normalized_watch_paths()
+    assert path == (_NFC.casefold() if fold else _NFC)
+    assert unicodedata.is_normalized("NFC", path)

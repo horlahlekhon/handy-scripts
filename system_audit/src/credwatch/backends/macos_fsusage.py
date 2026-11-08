@@ -15,6 +15,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -54,7 +55,7 @@ _HEAD = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<op>\S+)\s+(?P<re
 _TAIL = re.compile(
     rf"^(?P<mid>.*)\s+\d+\.\d+(?:\s+W)?\s+(?P<proc>.{{1,{MAXCOMLEN}}})\.(?P<tid>\d+)\s*$"
 )
-_PATH = re.compile(r"(?:^|\s)(/.*)$")
+_PATH = re.compile(r"(?:^|[\s\]])(/.*)$")  # same path starts as _candidate_starts
 _ERRNO = re.compile(r"\[\s*(\d+)\]")
 
 
@@ -67,6 +68,23 @@ class FsUsageHit:
     tid: int | None
     raw: str
     errno: int | None = None  # set when fs_usage shows `[ N]` (the call failed)
+
+
+def _nfc(text: str) -> str:
+    """NFC form (APFS treats NFC/NFD spellings as one name); ASCII is returned as is."""
+    return text if text.isascii() else unicodedata.normalize("NFC", text)
+
+
+def prefilter_keys(matcher: WatchMatcher) -> frozenset[str]:
+    """Final component of every watched path, as the matcher normalizes it.
+
+    Any line holding a path that matches a watched path W (after ./, //, ..,
+    case and NFC normalization) contains W's last component literally once the
+    line is NFC'd and casefolded: normpath only drops components, never builds
+    new ones, and '/' blocks Unicode composition. For a watched directory this
+    is the directory's own name, so files below it pass too.
+    """
+    return frozenset(p.rsplit("/", 1)[-1] for p in matcher.normalized_watch_paths())
 
 
 def _timestamp(text: str, today: date, now: datetime) -> datetime | None:
@@ -211,7 +229,8 @@ def parse_fs_usage_hits(
     loose search found at the same place; otherwise every found path is
     reported with proc_name=UNKNOWN_PROC, tid=None (flagged), and `miss` says why.
     """
-    text = line.rstrip("\r\n")
+    raw = line.rstrip("\r\n")  # original spelling, kept as evidence
+    text = _nfc(raw)  # paths are matched and reported in NFC form
     head = _HEAD.match(text)
     if head is None or head.group("op") not in RELEVANT_OPS:
         return (), None
@@ -242,7 +261,7 @@ def parse_fs_usage_hits(
         err = _ERRNO.search(rest[:offset])
         hits.append(FsUsageHit(
             timestamp=timestamp, op=head.group("op"), path=path, proc_name=proc, tid=tid,
-            raw=text, errno=int(err.group(1)) if err else None,
+            raw=raw, errno=int(err.group(1)) if err else None,
         ))
     return tuple(hits), miss
 
@@ -351,7 +370,7 @@ class MacFsUsageBackend(Backend):
     ) -> None:
         paths = tuple(watch_paths)
         self._matcher = WatchMatcher(paths, case_insensitive=True)  # APFS default
-        self._prefilter = tuple(os.path.normpath(str(p)).casefold() for p in paths)
+        self._prefilter = tuple(sorted(prefilter_keys(self._matcher)))
         self._popen = runner_popen
         self._export_dir = export_dir
         self._psutil = psutil_mod
@@ -400,8 +419,13 @@ class MacFsUsageBackend(Backend):
     # -- event stream --
 
     def _prefiltered(self, line: str) -> bool:
-        folded = line.casefold()
-        return any(p in folded for p in self._prefilter)
+        """Cheap, coarse pre-check: does the line hold a watched final component?
+
+        Must never reject a line the parser would report (see prefilter_keys);
+        false positives only cost a full parse.
+        """
+        folded = _nfc(_nfc(line).casefold())
+        return any(k in folded for k in self._prefilter)
 
     def _note_miss(self, reason: str, line: str) -> None:
         """WARNING per parse miss, at most once per MISS_LOG_INTERVAL_SECONDS."""
