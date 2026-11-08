@@ -75,9 +75,22 @@ Notes:
   and removes the temp dirs, even on failure. Confirm afterwards:
   `ls /etc/audit/rules.d/credwatch-e2e.rules` should say "No such file", and
   `sudo auditctl -l | grep e2e` should print nothing.
-- If a real credwatch service is running, stop it first
-  (`sudo systemctl stop credwatch`) or expect a harmless rule-count health warning in the
-  e2e daemon, since it counts every `-k credwatch` rule.
+- Real credwatch rules and the e2e test cannot coexist (the audit key must stay
+  `credwatch`, and rule counting would collide), so the test skips with "real credwatch
+  audit rules are loaded" if `/etc/audit/rules.d/credwatch.rules` exists or any
+  `-k credwatch` rule is loaded. Stopping the service does NOT unload the rules. If you
+  have already run `credwatch install`, move the rules aside first and restore afterwards:
+
+  ```bash
+  sudo mv /etc/audit/rules.d/credwatch.rules /root/credwatch.rules.bak && sudo augenrules --load
+  # (run the e2e command above)
+  sudo mv /root/credwatch.rules.bak /etc/audit/rules.d/credwatch.rules && sudo augenrules --load && sudo credwatch status
+  ```
+- The e2e daemon gets an empty `--secrets-file` and no `CREDWATCH_SMTP_*` environment, so it
+  never sends real mail.
+- Persistent side effect: if auditd is not active, the test runs
+  `systemctl enable --now auditd`, which starts it and enables it at boot. This is not
+  undone by teardown.
 - Without `CREDWATCH_E2E=1` or root the tests show as `skipped`.
 
 ## 3. Capture real audit lines to replace the hand-written fixtures (ruling R3)
@@ -98,10 +111,22 @@ Expected: `fixture.log` has several lines per access: `type=SYSCALL ...`, `type=
 `key="credwatch"`. Check no real secrets leaked into it (paths, cmdlines) before
 committing.
 
-To make a second fixture in the hex-encoded form (when a field contains spaces or
-non-printables, e.g. `exe`/`comm`), repeat with a path containing a space:
-`/tmp/cw probe` cannot be a rule (credwatch skips such paths), so instead run a process
-with a spaced name, e.g. `cp /bin/cat "/tmp/my cat" && "/tmp/my cat" /tmp/cw-probe`.
+For the hex-encoded fixture, watch a directory containing a file whose name has a space:
+
+```bash
+mkdir -p "/tmp/cw probe" && echo x > "/tmp/cw probe/x"
+sudo auditctl -w /tmp/cw\ probe -p rwa -k credwatch 2>/dev/null || sudo auditctl -w "/tmp/cw probe" -p rwa -k credwatch
+cat "/tmp/cw probe/x"
+sleep 2
+sudo ausearch -k credwatch --raw > fixture-hex.log
+sudo auditctl -W "/tmp/cw probe" -p rwa -k credwatch
+sudo chown "$USER" fixture-hex.log
+```
+
+auditd hex-encodes `name=` values that contain spaces (`name=2F746D702F...`, unquoted).
+Confirm the hex form appears in `fixture-hex.log` (`grep -E 'name=[0-9A-F]{8,}' fixture-hex.log`)
+before using it as `audit_hex.log`. If `auditctl` rejects the spaced path, note that and
+rely on a real log line from `/var/log/audit/audit.log` instead.
 
 Swap them in and re-run the parser tests:
 
@@ -127,7 +152,7 @@ unit, service start) with no errors; re-running it reports everything unchanged.
 ```bash
 sudoedit /etc/credwatch/secrets.env       # set CREDWATCH_SMTP_USER and CREDWATCH_SMTP_PASSWORD
 sudo credwatch test-email                 # expect "sent" and an email in the inbox
-sudo credwatch status --probe             # expect "probe: ok (canary access recorded)"; exit 0
+sudo credwatch status --probe             # expect the line `probe: ok (canary access recorded)` and exit 0 (on failure: `probe: FAILED (no event within N s)`, exit non-zero)
 echo $?
 sudo ls -l /var/lib/credwatch/captures    # a *.pcap file is present and its size grows
 sleep 10; sudo ls -l /var/lib/credwatch/captures
