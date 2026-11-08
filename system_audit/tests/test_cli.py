@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -476,7 +477,8 @@ def test_get_backend_linux(env):
     assert isinstance(b, LinuxAuditBackend) and b._expected == 1
 
 
-def test_get_backend_darwin_unavailable(env):
+def test_get_backend_darwin_unavailable(env, monkeypatch):
+    monkeypatch.setitem(sys.modules, "credwatch.backends.macos_fsusage", None)
     with pytest.raises(BackendError, match="macOS backend not available"):
         get_backend(_cfg(env, "darwin"), [], FakeRunner())
 

@@ -368,11 +368,6 @@ def test_requires_root(env):
         run_install("linux", env.target, runner=env.runner, root=env.root, executable=env.exe)
 
 
-def test_darwin_not_implemented(env):
-    with pytest.raises(InstallError, match="macOS installer not implemented yet"):
-        run_install("darwin", env.target, runner=env.runner, root=env.root)
-
-
 def test_install_rejects_unsafe_executable_before_writing(env, monkeypatch):
     def refuse(*a, **k):
         raise InstallError("reinstall with sudo pipx install --global .")
@@ -395,8 +390,8 @@ def test_execstart_is_running_entry_point_not_which(env, monkeypatch, tmp_path):
     link = tmp_path / "localbin" / "credwatch"
     link.parent.mkdir()
     link.symlink_to(real)
-    monkeypatch.setattr(linux.sys, "argv", [str(link), "install"])
-    monkeypatch.setattr(linux.shutil, "which", lambda name: "/usr/bin/some-other-credwatch")
+    monkeypatch.setattr(common.sys, "argv", [str(link), "install"])
+    monkeypatch.setattr(common.shutil, "which", lambda name: "/usr/bin/some-other-credwatch")
     env.install(executable=None)
     assert f"ExecStart={link} run" in (env.root / UNIT).read_text()
     assert env.trust_checked == [link]

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from credwatch.installer import linux
+from credwatch.installer import linux, macos
 from credwatch.installer.common import InstallError, InstallReport
 from credwatch.platform_info import TargetUser
 from credwatch.proc import Runner
@@ -23,9 +23,11 @@ def run_install(
 ) -> InstallReport:
     """Install/refresh the service. owner_uid is the test seam (see installer.common)."""
     if os_name == "darwin":
-        raise InstallError("macOS installer not implemented yet")
-    if os_name != "linux":
+        module = macos
+    elif os_name == "linux":
+        module = linux
+    else:
         raise InstallError(f"unsupported platform: {os_name}")
-    return linux.install(
+    return module.install(
         target, runner=runner, root=root, start=start, owner_uid=owner_uid, executable=executable
     )

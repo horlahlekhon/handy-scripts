@@ -1,0 +1,35 @@
+# HAND-WRITTEN FIXTURE - NOT CAPTURED ON A MAC. Replace with a real capture.
+# Format modelled on `sudo fs_usage -w -f filesys`: timestamp, op, F=fd / [errno],
+# (mode), path, elapsed seconds, optional W, then `procname.NNNN`.
+# To replace: see docs/macos-verification.md section 1. Unverified assumptions:
+#   (a) the trailing number is a thread id, not a pid;
+#   (b) failed calls show `[ errno]` before the path;
+#   (c) paths with spaces are printed verbatim (no quoting).
+# Lines starting with '#' are fixture comments; the tests skip them.
+23:59:58.101200  open              F=3        (R_____)  /usr/lib/libSystem.B.dylib                                                    0.000012   cat.2004211
+23:59:58.101400  fstat64           F=3                                                                                                0.000003   cat.2004211
+23:59:58.101500  close             F=3                                                                                                0.000004   cat.2004211
+23:59:58.102100  open              F=3        (R_____)  /Users/alice/.aws/credentials                                                 0.000021   cat.2004211
+23:59:58.102200  fstat64           F=3                                                                                                0.000002   cat.2004211
+23:59:58.102300  read              F=3    B=0x74                                                                                      0.000009   cat.2004211
+23:59:58.102400  write             F=1    B=0x74                                                                                      0.000011   cat.2004211
+23:59:58.102500  read              F=3    B=0x0                                                                                       0.000002   cat.2004211
+23:59:58.102600  close             F=3                                                                                                0.000003   cat.2004211
+23:59:58.110000  stat64                               /Users/alice/.aws/credentials                                                 0.000006   aws.2004300
+23:59:58.110100  open_nocancel     F=7        (R_____)  /Users/alice/.aws/config                                                      0.000015   aws.2004300
+23:59:58.110200  close_nocancel    F=7                                                                                                0.000002   aws.2004300
+23:59:58.200000  open              [  2]      (R_____)  /Users/alice/.netrc                                                           0.000008   curl.2004400
+23:59:58.300000  openat            F=5        (R_____)  /Users/alice/.ssh/id_ed25519                                                  0.000013 W ssh.2004500
+23:59:58.300100  getattrlist                            /Users/alice/.ssh                                                             0.000007   ssh.2004500
+23:59:58.400000  open              F=4        (R_____)  /Users/alice/Documents/notes.txt                                              0.000010   TextEdit.2004600
+23:59:58.500000  rename                                 /Users/alice/.kube/config.tmp                                                 0.000040   kubectl.2004700
+23:59:58.500100  unlink                                 /Users/alice/.kube/config.lock                                                0.000020   kubectl.2004700
+23:59:58.600000  open              F=9        (R_____)  /Library/Application Support/credwatch/canary                                 0.000011   python3.12.2004800
+23:59:58.700000  open              F=6        (R_____)  /Users/alice/.AWS/Credentials                                                 0.000012   Google Chrome He.2004900
+23:59:58.800000  open_dprotected_np F=8       (RW____)  /Users/alice/.docker/config.json                                              0.000016   docker.2005000
+23:59:58.900000  open              F=3        (R_____)  /Users/alice/.aws/credentials-backup/x                                        0.000010   cat.2005100
+23:59:59.000000  lstat64                                /private/var/db/timezone/localtime                                            0.000004   mds.2005200
+23:59:59.100000  open              F=10       (R_____)  /System/Library/CoreServices/SystemVersion.plist                              0.000009   mds_stores.2005300
+23:59:59.200000  read              F=10   B=0x1f4                                                                                     0.000003   mds_stores.2005300
+00:00:00.100000  open              F=3        (R_____)  /Users/alice/.aws/credentials                                                 0.000020   cat.2005400
+00:00:00.200000  close             F=3                                                                                                0.000002   cat.2005400

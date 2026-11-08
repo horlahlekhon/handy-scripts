@@ -10,18 +10,26 @@ import errno
 import logging
 import os
 import pwd
+import shutil
 import stat
 import sys
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import credwatch
 from credwatch.allowlist import is_root_controlled_dir, is_root_controlled_file
-from credwatch.config import Config
+from credwatch.config import Config, ConfigError, load_config
+from credwatch.paths import (
+    has_control_chars,
+    read_watch_list,
+    resolve_watch_paths_report,
+    write_watch_list,
+)
+from credwatch.platform_info import CONFIG_PATH, SECRETS_PATH, WATCH_LIST_PATH, TargetUser
 from credwatch.safe_fs import UnsafePathError, open_dir_chain
 
 logger = logging.getLogger(__name__)
@@ -41,6 +49,8 @@ SECRETS_TEMPLATE = "secrets.env.example"
 SECRETS_PLACEHOLDER = "REPLACE_ME"
 ROOT_USER = "root"
 REINSTALL_HINT = "reinstall root-owned with `sudo pipx install --global .`"
+ENTRY_POINT_NAME = "credwatch"
+SHEBANG_MAX_BYTES = 4096
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
@@ -367,3 +377,149 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+# --- shared install flow ----------------------------------------------------------
+
+
+def rooted(root: Path, path: Path) -> Path:
+    """Map an absolute system path under root (identity when root is '/')."""
+    return root / path.relative_to("/")
+
+
+def _shebang_interpreter(script: Path) -> Path | None:
+    try:
+        with script.open("rb") as fh:
+            first = fh.readline(SHEBANG_MAX_BYTES)
+    except OSError:
+        logger.warning("cannot read %s to check its interpreter", script, exc_info=True)
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    words = first[2:].decode("utf-8", errors="replace").split()
+    return Path(words[0]) if words else None
+
+
+def find_executable(
+    argv0: str | None = None,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    prefix: Path | None = None,
+) -> Path:
+    """The entry point that is actually running (unresolved, so a pipx symlink stays).
+
+    Falls back to PATH lookup only when argv[0] is not a file, and then only if
+    that script's interpreter lives inside our own sys.prefix.
+    """
+    argv0 = sys.argv[0] if argv0 is None else argv0
+    if argv0.endswith(".py"):
+        raise InstallError("run install via the installed `credwatch` command")
+    running = Path(os.path.abspath(argv0))
+    if running.is_file():
+        return running
+    found = which(ENTRY_POINT_NAME)
+    if not found:
+        raise InstallError("cannot locate the credwatch entry point; run the installed `credwatch` command")
+    candidate = Path(os.path.abspath(found))
+    own_prefix = (prefix or Path(sys.prefix)).resolve()
+    interpreter = _shebang_interpreter(candidate)
+    if interpreter is None or own_prefix not in interpreter.resolve().parents:
+        raise InstallError(
+            f"{candidate} (found on PATH) does not run this credwatch installation "
+            f"(interpreter {interpreter}, expected inside {own_prefix})"
+        )
+    return candidate
+
+
+def validate_executable(executable: Path) -> None:
+    text = str(executable)
+    if not executable.is_absolute():
+        raise InstallError(f"credwatch executable path must be absolute: {text!r}")
+    if has_control_chars(text) or any(c.isspace() for c in text):
+        raise InstallError(
+            f"credwatch executable path contains whitespace/control characters: {text!r}"
+        )
+
+
+def _config_files(config_dir: Path, owner_uid: int) -> StepResult:
+    config_path = config_dir / CONFIG_PATH.name
+    secrets_path = config_dir / SECRETS_PATH.name
+    result = ensure_owned_dir(config_dir, owner_uid=owner_uid)
+    created = bootstrap_config(config_path, owner_uid=owner_uid)
+    secrets_created, warnings = bootstrap_secrets(secrets_path, owner_uid=owner_uid)
+    return (
+        result.merge(outcome(f"file {config_path}", created))
+        .merge(outcome(f"file {secrets_path}", secrets_created))
+        .merge(StepResult(warnings=warnings))
+    )
+
+
+def _load(config_path: Path, os_name: str, target: TargetUser) -> Config:
+    try:
+        cfg = load_config(config_path, os_name, target)
+    except ConfigError as exc:
+        raise InstallError(f"invalid config {config_path}: {exc}") from exc
+    if not cfg.data_dir.is_absolute():
+        raise InstallError(f"data_dir must be an absolute path: {cfg.data_dir}")
+    return cfg
+
+
+def _watch_list(paths: tuple[Path, ...], dest: Path) -> StepResult:
+    try:
+        if read_watch_list(dest) == paths:
+            return outcome(f"file {dest}", False)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):  # includes UnicodeDecodeError
+        logger.warning("cannot read existing watch list %s; rewriting it", dest, exc_info=True)
+    write_watch_list(paths, dest)
+    return outcome(f"file {dest}", True)
+
+
+@dataclass(frozen=True)
+class PreparedInstall:
+    """Outcome of the OS-neutral steps; the OS module adds its service on top."""
+
+    executable: Path
+    config: Config  # as loaded: real system paths (what the service will see)
+    paths: tuple[Path, ...]  # watched paths written to the watch list
+    result: StepResult
+
+
+def prepare_install(
+    os_name: str,
+    target: TargetUser,
+    *,
+    root: Path,
+    owner_uid: int,
+    executable: Path | None,
+    config_dir: Path,
+    trust_check: Callable[[Path, Path], None],
+) -> PreparedInstall:
+    """Root check, executable trust, config/secrets bootstrap, data dirs, watch list.
+
+    config_dir is the system config dir as safe_fs must see it (on macOS the
+    /private-resolved form of /etc/credwatch); it is mapped under root here.
+    """
+    if os.geteuid() != owner_uid:
+        raise InstallError("credwatch install must be run as root (sudo credwatch install)")
+    exe = executable or find_executable()
+    validate_executable(exe)
+    trust_check(exe, Path(sys.prefix))
+
+    local_config_dir = rooted(root, config_dir)
+    result = _config_files(local_config_dir, owner_uid)
+    cfg = _load(local_config_dir / CONFIG_PATH.name, os_name, target)
+    local_cfg = replace(cfg, data_dir=rooted(root, cfg.data_dir))
+    result = result.merge(ensure_dirs(local_cfg, owner_uid=owner_uid))
+
+    paths, skipped_targets = resolve_watch_paths_report(local_cfg)
+    link_warnings = tuple(
+        f"symlink {link} points outside {cfg.home} (or to an unsafe path) at {target_path}; "
+        "only the link is watched"
+        for link, target_path in skipped_targets
+    )
+    result = result.merge(StepResult(warnings=link_warnings)).merge(
+        _watch_list(paths, local_config_dir / WATCH_LIST_PATH.name)
+    )
+    return PreparedInstall(executable=exe, config=cfg, paths=paths, result=result)

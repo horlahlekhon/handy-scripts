@@ -38,5 +38,8 @@ def get_backend(config: Config, watch_paths: Iterable[Path], runner: Runner) -> 
             if exc.name != MACOS_MODULE:
                 raise
             raise BackendError("macOS backend not available in this build") from exc
-        return getattr(module, MACOS_CLASS)(watch_paths=paths, runner=runner)
+        # fs_usage is a long-lived child, spawned with Popen rather than the Runner.
+        return getattr(module, MACOS_CLASS)(
+            watch_paths=paths, export_dir=config.data_dir / "audit-exports"
+        )
     raise BackendError(f"unsupported platform: {config.os_name}")
