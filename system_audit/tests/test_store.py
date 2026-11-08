@@ -342,3 +342,34 @@ def test_legacy_db_without_late_columns_is_migrated(tmp_path, caplog):
         s.close()
     assert rows[0].canonical_path == "/c" and rows[0].snapshot.pid == 100
     assert "added events.canonical_path" in caplog.text
+
+
+def test_inode_and_dev_round_trip(store):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    pe = make_pe(t0)
+    ev = FileAccessEvent(**{**pe.event.__dict__, "inode": 77, "dev": 8})
+    store.record(ProcessedEvent(ev, pe.verdict, None))
+    store.record(pe)
+    rows = store.events_since(t0)
+    assert [(r.inode, r.dev) for r in rows] == [(77, 8), (None, None)]
+
+
+def test_legacy_db_gets_inode_dev_columns(tmp_path):
+    import sqlite3
+
+    s = Store(tmp_path / "e.db")
+    s.close()
+    con = sqlite3.connect(tmp_path / "e.db")
+    con.execute("ALTER TABLE events DROP COLUMN inode")
+    con.execute("ALTER TABLE events DROP COLUMN dev")
+    con.commit()
+    con.close()
+    s = Store(tmp_path / "e.db")
+    try:
+        t0 = datetime(2026, 1, 1, tzinfo=UTC)
+        pe = make_pe(t0)
+        ev = FileAccessEvent(**{**pe.event.__dict__, "inode": 5, "dev": 6})
+        s.record(ProcessedEvent(ev, pe.verdict, None))
+        assert (s.events_since(t0)[0].inode, s.events_since(t0)[0].dev) == (5, 6)
+    finally:
+        s.close()

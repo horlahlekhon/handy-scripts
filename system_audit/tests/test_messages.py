@@ -76,7 +76,9 @@ def test_matched_rule_shown():
 def test_subject_strips_crlf_injection():
     ev = _event(exe=None, comm="x\r\nBcc: evil@x")
     subject, _ = _alert([ev], host="h\n1")
+    assert subject == "[credwatch][h1] FLAGGED: xBcc: evil@x accessed 1 credential path(s)"
     assert "\r" not in subject and "\n" not in subject
+    assert _alert([_event(exe=None, comm="a\u2028b")])[0].count("\u2028") == 0
     assert "\x85" not in format_health_alert(["a\x85b c"], "h")[0]
     long_subject, _ = format_health_alert(["p" * 500], "h")
     assert len(long_subject) <= 200
@@ -113,3 +115,50 @@ def test_health_subject():
     subject, body = format_health_alert(["auditd stopped", "disk full"], "h1")
     assert subject == "[credwatch][h1] DEGRADED: auditd stopped"
     assert "disk full" in body
+
+
+def test_subject_strips_bidi_override():
+    subject, _ = format_health_alert(["a‮b​c"], "h")
+    assert subject == "[credwatch][h] DEGRADED: abc"
+
+
+def test_body_escapes_c1_and_zero_width():
+    _, body = _alert([_event(exe="/x\x9b31m​‮ ")])
+    assert "/x\\x9b31m\\u200b\\u202e\\u2028" in body
+    assert not any(c in body for c in "\x9b​‮ ")
+
+
+def test_unknown_and_none_rendered_readably():
+    ev = FileAccessEvent(TS, "/p", None, None, None, None, None, "b", "raw")
+    _, body = _alert([ProcessedEvent(ev, Verdict(False, None), None, None)])
+    assert "None" not in body
+    assert "(unknown)" in body and "(none)" in body
+
+
+def test_subject_counts_other_processes():
+    a, b, c = _event(exe="/a"), _event(exe="/b"), _event(exe=None, comm="c")
+    subject, _ = _alert([a, b, c])
+    assert subject == "[credwatch][h1] FLAGGED: /a +2 other process(es) accessed 1 credential path(s)"
+
+
+def test_connections_capped():
+    conns = tuple(Connection("inet", "tcp", "l", f"r{i}", "ESTABLISHED") for i in range(60))
+    snap = NetworkSnapshot(42, TS, True, conns, (), None)
+    _, body = _alert([_event(snapshot=snap)])
+    assert "r49" in body and "r50" not in body
+    assert "... 10 more" in body
+
+
+def _row(i, inode=None, canonical=None):
+    return EventRow(i, TS, f"/p{i}", 1, 1, "/e", "e", True, "b", False, None, "raw", None,
+                    canonical_path=canonical, inode=inode)
+
+
+def test_digest_flagged_capped_and_unverified():
+    rows = [_row(i, inode=3) for i in range(205)]
+    _, body = format_digest(_summary(205, 205), rows, [], "h")
+    assert "/p199" in body and "/p200" not in body
+    assert "... 5 more" in body
+    assert "UNVERIFIED path" in body
+    _, body = format_digest(_summary(1, 1), [_row(1, inode=3, canonical="/c")], [], "h")
+    assert "UNVERIFIED path" not in body

@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS events (
     allowed INTEGER NOT NULL,
     matched_rule TEXT,
     raw TEXT NOT NULL,
-    canonical_path TEXT
+    canonical_path TEXT,
+    inode INTEGER, dev INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_allowed ON events(allowed);
@@ -57,12 +58,18 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
-_LATE_COLUMNS = (("events", "canonical_path", "TEXT"), ("net_snapshots", "pid", "INTEGER"))
+_LATE_COLUMNS = (
+    ("events", "canonical_path", "TEXT"),
+    ("net_snapshots", "pid", "INTEGER"),
+    ("events", "inode", "INTEGER"),
+    ("events", "dev", "INTEGER"),
+)
 
 _EVENT_SELECT = """
 SELECT e.id, e.ts, e.path, e.pid, e.ppid, e.exe, e.comm, e.success, e.backend,
        e.allowed, e.matched_rule, e.raw,
-       s.taken_at, s.alive, s.error, s.connections_json, s.ancestry_json, s.pid, e.canonical_path
+       s.taken_at, s.alive, s.error, s.connections_json, s.ancestry_json, s.pid, e.canonical_path,
+       e.inode, e.dev
 FROM events e LEFT JOIN net_snapshots s ON s.event_id = e.id
 """
 
@@ -87,6 +94,8 @@ class EventRow:
     raw: str
     snapshot: NetworkSnapshot | None
     canonical_path: str | None = None
+    inode: int | None = None
+    dev: int | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +214,7 @@ def _row_to_event(r: tuple) -> EventRow:
         id=r[0], ts=_from_text(r[1]), path=r[2], pid=r[3], ppid=r[4], exe=r[5],
         comm=r[6], success=_opt_bool(r[7]), backend=r[8], allowed=bool(r[9]),
         matched_rule=r[10], raw=r[11], snapshot=snapshot, canonical_path=r[18],
+        inode=r[19], dev=r[20],
     )
 
 
@@ -269,10 +279,12 @@ class Store:
         with self._conn:  # one transaction
             cur = self._conn.execute(
                 "INSERT INTO events (ts, path, pid, ppid, exe, comm, success, backend,"
-                " allowed, matched_rule, raw, canonical_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " allowed, matched_rule, raw, canonical_path, inode, dev)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (_to_text(ev.timestamp), ev.path, ev.pid, ev.ppid, ev.exe, ev.comm,
                  None if ev.success is None else int(ev.success), ev.backend,
-                 int(pe.verdict.allowed), pe.verdict.matched_rule, ev.raw, pe.canonical_path),
+                 int(pe.verdict.allowed), pe.verdict.matched_rule, ev.raw, pe.canonical_path,
+                 ev.inode, ev.dev),
             )
             event_id = int(cur.lastrowid)
             if snap is not None:

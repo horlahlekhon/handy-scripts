@@ -17,6 +17,7 @@ from credwatch.config import CaptureConfig
 
 logger = logging.getLogger(__name__)
 
+PCAP_FILENAME_PATTERN = "credwatch-%Y%m%d-%H%M%S.pcap"
 PCAP_GLOB = "credwatch-*.pcap"
 STDERR_TAIL_BYTES = 2048
 BACKOFF_BASE_SECONDS = 1
@@ -35,7 +36,7 @@ def build_tcpdump_argv(cfg: CaptureConfig, out_dir: Path) -> list[str]:
     return [
         "tcpdump", "-i", cfg.interface, "-n", "-s", str(cfg.snaplen),
         "-G", str(cfg.rotate_seconds), "-Z", cfg.drop_privileges_to,
-        "-w", str(out_dir / "credwatch-%Y%m%d-%H%M%S.pcap"),
+        "-w", str(out_dir / PCAP_FILENAME_PATTERN),
     ]
 
 
