@@ -225,6 +225,17 @@ def _write_atomic(target: Path, content: str) -> None:
         raise
 
 
+def _assert_not_immutable(runner: Runner) -> None:
+    status = runner.run(["auditctl", "-s"])
+    if status.returncode != 0:
+        logger.warning(
+            "auditctl -s failed (rc=%d): %s", status.returncode, (status.stderr or "").strip()
+        )
+    match = _ENABLED.search(status.stdout or "")
+    if match and match.group(1) == "2":
+        raise BackendError("audit rules are immutable (-e 2); reboot required to load credwatch rules")
+
+
 def install_rules(
     paths: Iterable[Path],
     rules_file: Path = DEFAULT_RULES_FILE,
@@ -232,22 +243,35 @@ def install_rules(
     runner: Runner,
     key: str = "credwatch",
 ) -> bool:
-    """Write the rules file if its content differs and load it. Returns True if changed."""
+    """Make the file and the kernel state match. Returns True if written or reloaded.
+
+    The file is only written when its content differs, but the loaded rule
+    count is always verified so a re-run repairs a flushed or failed load.
+    """
     text = render_rules(paths, key).text
+    expected = sum(1 for line in text.splitlines() if line.startswith("-w "))
     try:
-        current = rules_file.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        current = None
-    if current == text:
+        try:
+            current = rules_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current = None
+        wrote = current != text
+        if wrote:
+            _assert_not_immutable(runner)
+            _write_atomic(rules_file, text)
+    except OSError as exc:
+        raise BackendError(f"cannot write audit rules file {rules_file}: {exc}") from exc
+    if not wrote and count_loaded_rules(runner, key) == expected:
         return False
-    status = runner.run(["auditctl", "-s"])
-    match = _ENABLED.search(status.stdout or "")
-    if match and match.group(1) == "2":
-        raise BackendError("audit rules are immutable (-e 2); reboot required to load credwatch rules")
-    _write_atomic(rules_file, text)
+    _assert_not_immutable(runner)
     result = runner.run(["augenrules", "--load"])
     if result.returncode != 0:
         raise BackendError(f"augenrules --load failed: {(result.stderr or '').strip()}")
+    loaded = count_loaded_rules(runner, key)
+    if loaded != expected:
+        raise BackendError(
+            f"loaded {loaded} credwatch rules, expected {expected} after augenrules --load"
+        )
     return True
 
 
@@ -313,7 +337,8 @@ class LinuxAuditBackend(Backend):
         )
 
     def export_native_log(self, dest_dir: Path) -> Path | None:
-        result = self._ausearch("checkpoint" if self._checkpoint.exists() else "today")
+        saved = self._checkpoint.read_bytes() if self._checkpoint.exists() else None
+        result = self._ausearch("checkpoint" if saved is not None else "today")
         if result.returncode in _CHECKPOINT_ERRORS:
             logger.warning(
                 "ausearch checkpoint unusable (rc=%d); retrying from today", result.returncode
@@ -327,9 +352,31 @@ class LinuxAuditBackend(Backend):
             )
         if not (result.stdout or "").strip():
             return None
-        dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        out = dest_dir / f"ausearch-{datetime.now().strftime('%Y%m%dT%H%M%S')}.txt"
-        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(result.stdout)
+        out = dest_dir / f"ausearch-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}.txt"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(result.stdout)
+        except OSError as exc:
+            self._restore_checkpoint(saved)
+            try:
+                out.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove partial export %s", out, exc_info=True)
+            raise BackendError(f"could not write ausearch export {out}: {exc}") from exc
         return out
+
+    def _restore_checkpoint(self, saved: bytes | None) -> None:
+        """Undo ausearch's checkpoint advance so the next export retries the same events."""
+        try:
+            if saved is None:
+                self._checkpoint.unlink(missing_ok=True)
+            else:
+                self._checkpoint.write_bytes(saved)
+        except OSError:
+            logger.exception(
+                "export write failed and checkpoint %s could not be restored; "
+                "events since the previous checkpoint were not exported",
+                self._checkpoint,
+            )

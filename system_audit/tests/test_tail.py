@@ -93,3 +93,13 @@ def test_follow_replaces_invalid_utf8(tmp_path):
     stop = threading.Event()
     assert collect(follow(log, stop, poll=0.01, from_end=False), 1) == ["bad�"]
     stop.set()
+
+
+def test_follow_reads_late_appearing_file_from_start_even_with_from_end(tmp_path):
+    log = tmp_path / "audit.log"
+    stop = threading.Event()
+    gen = follow(log, stop, poll=0.01)  # from_end=True, file missing at startup
+    assert next(gen) == ""
+    append(log, b"first\nsecond\n")
+    assert collect(gen, 2) == ["first", "second"]
+    stop.set()

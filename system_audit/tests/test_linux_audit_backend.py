@@ -1,7 +1,6 @@
 import stat
 import subprocess
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -45,10 +44,11 @@ def test_render_rules_exact_format():
 
 
 def test_render_rules_skips_whitespace_paths(caplog):
+    caplog.set_level("WARNING")
     out = render_rules([Path("/ok"), Path("/has space/x")])
     assert out.skipped == (Path("/has space/x"),)
     assert "has space" not in out.text
-    assert "WARNING" in caplog.text or caplog.records
+    assert any(r.levelname == "WARNING" and "has space" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize("ch", ["\n", "\x00", "\x7f", "\x85", " ", " ", "\t"])
@@ -59,14 +59,46 @@ def test_render_rules_skips_control_char_paths(ch):
     assert out.text.count("-w ") == 1
 
 
+ONE_RULE = "-w /a -p rwa -k credwatch\n"
+
+
 def test_install_rules_idempotent(tmp_path):
     rules = tmp_path / "credwatch.rules"
-    runner = FakeRunner({("auditctl", "-s"): [(0, "enabled 1\n", "")]})
+    runner = FakeRunner({
+        ("auditctl", "-s"): [(0, "enabled 1\n", "")],
+        ("auditctl", "-l"): [(0, ONE_RULE, "")],
+    })
     assert install_rules([Path("/a")], rules, runner=runner) is True
     assert install_rules([Path("/a")], rules, runner=runner) is False
     assert runner.count(("augenrules", "--load")) == 1
     assert stat.S_IMODE(rules.stat().st_mode) == 0o640
     assert list(tmp_path.iterdir()) == [rules]
+
+
+def test_reload_when_file_current_but_kernel_flushed(tmp_path):
+    rules = tmp_path / "credwatch.rules"
+    rules.write_text(render_rules([Path("/a")]).text)
+    runner = FakeRunner({("auditctl", "-l"): [(0, "", ""), (0, ONE_RULE, "")]})
+    assert install_rules([Path("/a")], rules, runner=runner) is True
+    assert runner.count(("augenrules", "--load")) == 1
+
+
+def test_rerun_after_failed_augenrules_reloads(tmp_path):
+    rules = tmp_path / "credwatch.rules"
+    runner = FakeRunner({
+        ("augenrules",): [(1, "", "boom"), (0, "", "")],
+        ("auditctl", "-l"): [(0, "", ""), (0, ONE_RULE, "")],
+    })
+    with pytest.raises(BackendError, match="boom"):
+        install_rules([Path("/a")], rules, runner=runner)
+    assert install_rules([Path("/a")], rules, runner=runner) is True
+    assert runner.count(("augenrules", "--load")) == 2
+
+
+def test_post_load_count_mismatch_raises(tmp_path):
+    runner = FakeRunner({("auditctl", "-l"): [(0, "", "")]})
+    with pytest.raises(BackendError, match="loaded 0 credwatch rules, expected 1"):
+        install_rules([Path("/a")], tmp_path / "r", runner=runner)
 
 
 def test_install_rules_immutable_raises(tmp_path):
@@ -76,6 +108,29 @@ def test_install_rules_immutable_raises(tmp_path):
         install_rules([Path("/a")], rules, runner=runner)
     assert not rules.exists()
     assert runner.count(("augenrules",)) == 0
+
+
+def test_immutable_checked_on_reload_with_current_file(tmp_path):
+    rules = tmp_path / "credwatch.rules"
+    rules.write_text(render_rules([Path("/a")]).text)
+    runner = FakeRunner({("auditctl", "-s"): [(0, "enabled 2\n", "")]})
+    with pytest.raises(BackendError, match="immutable"):
+        install_rules([Path("/a")], rules, runner=runner)
+
+
+def test_auditctl_status_failure_warns(tmp_path, caplog):
+    caplog.set_level("WARNING")
+    runner = FakeRunner({
+        ("auditctl", "-s"): [(1, "", "nope")],
+        ("auditctl", "-l"): [(0, ONE_RULE, "")],
+    })
+    install_rules([Path("/a")], tmp_path / "r", runner=runner)
+    assert any(r.levelname == "WARNING" and "auditctl -s" in r.getMessage() for r in caplog.records)
+
+
+def test_install_rules_missing_parent_dir_raises_backend_error(tmp_path):
+    with pytest.raises(BackendError, match="cannot write"):
+        install_rules([Path("/a")], tmp_path / "nodir" / "r", runner=FakeRunner())
 
 
 def test_install_rules_augenrules_failure_raises(tmp_path):
@@ -133,6 +188,31 @@ def test_export_falls_back_when_checkpoint_invalid(tmp_path, caplog):
     assert "WARNING" in [r.levelname for r in caplog.records]
 
 
+def test_export_write_failure_restores_checkpoint(tmp_path):
+    ckpt = tmp_path / "ckpt"
+    ckpt.write_bytes(b"old")
+
+    class Advancing(FakeRunner):
+        def run(self, argv, **kw):
+            ckpt.write_bytes(b"new")
+            return super().run(argv, **kw)
+
+    runner = Advancing({("ausearch",): [(0, "data\n", "")]})
+    blocker = tmp_path / "out"
+    blocker.write_text("a file, not a dir")
+    with pytest.raises(BackendError, match="could not write"):
+        make_backend(tmp_path, runner).export_native_log(blocker)
+    assert ckpt.read_bytes() == b"old"
+
+
+def test_export_filenames_do_not_collide(tmp_path):
+    runner = FakeRunner({("ausearch",): [(0, "d\n", "")]})
+    backend = make_backend(tmp_path, runner)
+    first = backend.export_native_log(tmp_path / "out")
+    second = backend.export_native_log(tmp_path / "out")
+    assert first != second
+
+
 def test_export_uses_today_without_checkpoint_and_raises_on_failure(tmp_path):
     runner = FakeRunner({("ausearch",): [(2, "", "weird")]})
     with pytest.raises(BackendError, match="weird"):
@@ -140,7 +220,18 @@ def test_export_uses_today_without_checkpoint_and_raises_on_failure(tmp_path):
     assert runner.calls[0][-2:] == ("-ts", "today")
 
 
-def test_backend_flushes_stale_group_without_new_lines(tmp_path):
+def test_backend_flushes_stale_group_without_new_lines(tmp_path, monkeypatch):
+    import credwatch.backends.linux_audit as mod
+
+    ready = threading.Event()
+    real_follow = mod.follow
+
+    def signalling_follow(*a, **kw):
+        for line in real_follow(*a, **kw):
+            ready.set()  # first yield means the file is open and positioned at the end
+            yield line
+
+    monkeypatch.setattr(mod, "follow", signalling_follow)
     group = [
         ln for ln in (FIXTURES / "audit_enriched.log").read_text().split("\n")
         if "4567" in ln and "type=EOE" not in ln
@@ -158,7 +249,7 @@ def test_backend_flushes_stale_group_without_new_lines(tmp_path):
 
     t = threading.Thread(target=consume)
     t.start()
-    time.sleep(0.1)
+    assert ready.wait(timeout=5)
     with open(log, "a") as fh:
         fh.write("\n".join(group) + "\n")
     t.join(timeout=5)

@@ -72,6 +72,7 @@ def follow(
             if fh is None:
                 fh = _open(path)
                 if fh is None:
+                    seek_end = False  # appears after startup: read from the beginning
                     now = time.monotonic()
                     if last_warn == 0.0 or now - last_warn >= MISSING_WARN_INTERVAL:
                         logger.warning("audit log %s not found; retrying", path)
