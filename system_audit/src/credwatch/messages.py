@@ -44,6 +44,9 @@ def _esc(value: object, missing: str = UNKNOWN) -> str:
     return "".join(out)
 
 
+escape_untrusted = _esc  # public name for other modules rendering DB-sourced text
+
+
 def _more(n: int) -> str:
     return f"  ... {n} more"
 
