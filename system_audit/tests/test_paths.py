@@ -362,10 +362,11 @@ def test_watch_matcher_nfd_uppercase_matches_case_insensitively():
 
 
 @pytest.mark.parametrize("fold", [False, True])
-def test_watch_matcher_normalized_watch_paths_are_nfc(fold):
+def test_watch_matcher_normalized_watch_paths_are_canonical(fold):
+    """NFC when case-sensitive; canonical caseless NFD(casefold(NFD)) when folded."""
     (path,) = WatchMatcher([Path(_NFD)], case_insensitive=fold).normalized_watch_paths()
-    assert path == (_NFC.casefold() if fold else _NFC)
-    assert unicodedata.is_normalized("NFC", path)
+    assert path == (unicodedata.normalize("NFD", _NFC.casefold()) if fold else _NFC)
+    assert unicodedata.is_normalized("NFD" if fold else "NFC", path)
 
 
 def test_watch_matcher_watch_paths_keep_case_and_are_nfc():
@@ -376,4 +377,5 @@ def test_watch_matcher_watch_paths_keep_case_and_are_nfc():
 @pytest.mark.parametrize("fold", [False, True])
 def test_watch_matcher_normalize_is_the_matches_form(fold):
     m = WatchMatcher([Path(_NFC)], case_insensitive=fold)
-    assert m.normalize(_NFD + "/./x") == (_NFC.casefold() if fold else _NFC) + "/x"
+    expected = unicodedata.normalize("NFD", _NFC.casefold()) if fold else _NFC
+    assert m.normalize(_NFD + "/./x") == expected + "/x"

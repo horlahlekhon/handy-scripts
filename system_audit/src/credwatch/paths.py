@@ -168,13 +168,16 @@ class WatchMatcher:
         self._prefixes = tuple(n.rstrip(os.sep) + os.sep for n in normalized)
 
     def _norm(self, path: str) -> str:
-        """NFC + normpath, then casefold (re-NFC'd) if insensitive.
+        """NFC + normpath; if insensitive, Unicode canonical caseless form on top.
 
         NFC: APFS treats NFC and NFD spellings of a name as the same file, and NFC
         only merges canonically equivalent spellings, so ASCII paths are unaffected.
+        Caseless: NFD(casefold(NFD(x))) (Unicode canonical caseless matching), so
+        e.g. U+0390 and capital U+03AA U+0301 compare equal. Every comparison site
+        in the fs_usage backend uses this same form (see canonical_caseless).
         """
         normed = _lexical(path)
-        return unicodedata.normalize("NFC", normed.casefold()) if self._fold else normed
+        return canonical_caseless(normed) if self._fold else normed
 
     def normalize(self, path: str) -> str:
         """`path` in the form matches() compares (and normalized_watch_paths() returns)."""
@@ -189,12 +192,19 @@ class WatchMatcher:
         return self._fold
 
     def normalized_watch_paths(self) -> tuple[str, ...]:
-        """The watched paths as matches() compares them: normpath'd, NFC, casefolded if insensitive."""
+        """The watched paths as matches() compares them: normpath'd, NFC, canonical caseless if insensitive."""
         return tuple(sorted(self._exact))
 
     def watch_paths(self) -> tuple[str, ...]:
         """The watched paths normpath'd and NFC'd, original case kept (for reporting)."""
         return self._display
+
+
+def canonical_caseless(text: str) -> str:
+    """NFD(casefold(NFD(text))): Unicode canonical caseless matching form (D145)."""
+    if text.isascii():
+        return text.casefold()
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", text).casefold())
 
 
 def _lexical(path: str) -> str:

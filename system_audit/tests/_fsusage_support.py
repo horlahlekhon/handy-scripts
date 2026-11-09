@@ -35,6 +35,7 @@ WATCHED = (
     Path("/Users/alice/.docker/config.json"),
     Path("/Library/Application Support/credwatch/canary"),
     Path(unicodedata.normalize("NFC", "/Users/josé/.netrc")),
+    Path("/Users/\u0390\u03b0/.aws/credentials"),
 )
 JOSE_NETRC = unicodedata.normalize("NFC", "/Users/josé/.netrc")
 
@@ -63,6 +64,7 @@ def _hits(line, matcher):
 _NAME_ALPHABET = (
     string.ascii_letters + string.digits + string.punctuation + "      ./]"
     + "ßﬁİŉǰéü"
+    + "\u0390\u03b0\u1fd3\u1fe3\u03aa\u03ab\u0399\u03a5\u0308"  # Greek ΐ/ΰ family
 )
 _NAME_PIECES = (
     " W ", " 0.5 ", " 1.000010 ", "..", ".123", " ", "W", "9.9", "[ 2]", "/", "ßß",
@@ -71,6 +73,7 @@ _NAME_PIECES = (
 _TARGETS = (
     "/Users/alice/.netrc", "/Users/alice/.aws/credentials", "/Users/alice/.ssh/id_x",
     "/Library/Application Support/credwatch/canary", "/Users/alice/.ssh/a b", JOSE_NETRC,
+    "/Users/\u0390\u03b0/.aws/credentials",
 )
 
 
@@ -96,8 +99,9 @@ _WS_COMPONENTS = ("x  y", "x ", "a\tb", "  ", " z", "q\t", " ")
 
 
 def _key(path):
-    nfc = unicodedata.normalize("NFC", os.path.normpath("/" + path.lstrip("/")))
-    return unicodedata.normalize("NFC", nfc.casefold())
+    """Canonical caseless form NFD(casefold(NFD(.))), as the backend compares."""
+    nfd = unicodedata.normalize("NFD", os.path.normpath("/" + path.lstrip("/")))
+    return unicodedata.normalize("NFD", nfd.casefold())
 
 
 def _random_lines(seed, count=500):

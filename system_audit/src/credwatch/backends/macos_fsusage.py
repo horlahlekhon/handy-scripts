@@ -26,7 +26,7 @@ import psutil
 
 from credwatch.backends.base import Backend, BackendError
 from credwatch.models import FileAccessEvent
-from credwatch.paths import WatchMatcher
+from credwatch.paths import WatchMatcher, canonical_caseless
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ _EXPORT_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CL
 
 UNKNOWN_PROC = "?"
 DOTDOT_MISS = "unresolvable '..' path; attributed to watched path by component name"
+NON_ASCII_MISS = "non-ASCII line without an exact watched-path match; attributed by component name"
 MISS_LOG_INTERVAL_SECONDS = 60
 
 _HEAD = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<op>\S+)\s+(?P<rest>.*)$")
@@ -86,18 +87,19 @@ def prefilter_keys(matcher: WatchMatcher) -> frozenset[str]:
     """Final component of every watched path, as the matcher normalizes it.
 
     Any line holding a path that matches a watched path W (after ./, //, ..,
-    case and NFC normalization) contains W's last component literally once the
-    line is put through fold_line: normpath only drops components, never builds
-    new ones, and '/' blocks Unicode composition. For a watched directory this
-    is the directory's own name, so files below it pass too.
+    case and canonical normalization) contains W's last component literally
+    once the line is put through fold_line: normpath only drops components,
+    never builds new ones, and '/' (a starter) bounds canonical reordering.
+    For a watched directory this is the directory's own name, so files below
+    it pass too.
     """
     return frozenset(_component_key(p, matcher) for p in matcher.watch_paths())
 
 
 def fold_line(text: str, matcher: WatchMatcher) -> str:
-    """text in the form prefilter keys are compared against (same as matcher.normalize)."""
-    nfc = _nfc(text)
-    return _nfc(nfc.casefold()) if matcher.case_insensitive else nfc
+    """text in the form prefilter keys are compared against (same as matcher.normalize):
+    canonical caseless NFD(casefold(NFD(.))) when insensitive, else NFC."""
+    return canonical_caseless(text) if matcher.case_insensitive else _nfc(text)
 
 
 def _timestamp(text: str, today: date, now: datetime) -> datetime | None:
@@ -158,11 +160,16 @@ def _candidate_starts(rest: str) -> list[int]:
 
 
 def _fold_with_offsets(text: str) -> tuple[str, list[int]]:
-    """Casefold char by char; offsets[k] is the original index of folded char k."""
+    """Canonical caseless fold char by char; offsets[k] is the original index of folded char k.
+
+    Per character, NFD(casefold(NFD(c))) equals the whole-string fold except
+    where canonical reordering moves combining marks across characters; such
+    lines produce no needle hit and reach the non-ASCII component fallback.
+    """
     folded: list[str] = []
     offsets: list[int] = []
     for i, ch in enumerate(text):
-        piece = ch.casefold()
+        piece = canonical_caseless(ch)
         folded.append(piece)
         offsets.extend([i] * len(piece))
     offsets.append(len(text))
@@ -170,22 +177,21 @@ def _fold_with_offsets(text: str) -> tuple[str, list[int]]:
 
 
 def _needles(matcher: WatchMatcher) -> tuple[str, ...]:
-    """casefold(NFC(normpath(p))) per watched path, WITHOUT a trailing NFC.
+    """Each watched path in the matcher's comparison form.
 
-    The haystack is casefold(NFC(line)), built char by char. casefold maps each
-    character independently, so a line holding an NFC spelling of p holds
-    casefold(NFC(p)) at the same place, and the offset map stays exact. (A
-    trailing NFC on the needle alone would miss e.g. U+01F0, which casefolds
-    to a decomposed j + U+030C.)
+    Insensitive: canonical caseless NFD(casefold(NFD(p))), the same form as the
+    haystack (built char by char by _fold_with_offsets) and the prefilter, so
+    e.g. U+01F0 and every case/composition spelling of U+0390 meet in one form.
     """
-    paths = matcher.watch_paths()
-    return tuple(sorted({p.casefold() for p in paths})) if matcher.case_insensitive else paths
+    if matcher.case_insensitive:
+        return matcher.normalized_watch_paths()
+    return matcher.watch_paths()
 
 
 def _needle_starts(rest: str, matcher: WatchMatcher) -> list[tuple[int, int]]:
     """(start, end) in rest of every watched path occurring at a left path boundary.
 
-    `rest` is already NFC. Needle and haystack use one form: casefold(NFC(.)).
+    `rest` is already NFC. Needle and haystack use one form (see _needles).
     """
     if matcher.case_insensitive:
         haystack, offsets = _fold_with_offsets(rest)
@@ -207,8 +213,13 @@ def _needle_starts(rest: str, matcher: WatchMatcher) -> list[tuple[int, int]]:
     return found
 
 
-def _loose_paths(rest: str, matcher: WatchMatcher) -> tuple[tuple[str, int], ...]:
-    """Every watched path in rest as (normalized path, start offset), one per start.
+Found = tuple[tuple[str, int], ...]  # (normalized watched path, start offset in rest)
+Spans = tuple[tuple[int, int], ...]  # (start, end) in rest of every exact match
+
+
+def _loose_spans(rest: str, matcher: WatchMatcher) -> tuple[Found, Spans]:
+    """(every watched path in rest as (normalized path, start offset), one per start;
+    the (start, end) span of every exact match, duplicates included).
 
     Two independent searches: '/'-starting candidates (handles ./, //, `[ 2]/x`)
     and watched-path needles (casefolded with an offset map, so names that
@@ -229,11 +240,11 @@ def _loose_paths(rest: str, matcher: WatchMatcher) -> tuple[tuple[str, int], ...
     out = []
     for start in sorted(spans):
         path = _normalize(rest[start:spans[start]])
-        key = path.casefold() if matcher.case_insensitive else path
+        key = matcher.normalize(path)
         if key not in seen:
             seen.add(key)
             out.append((path, start))
-    return tuple(out)
+    return tuple(out), tuple(sorted(spans.items()))
 
 
 def _strict(rest: str) -> tuple[str, str, int, int] | None:
@@ -254,18 +265,78 @@ def _original_name(raw: str) -> tuple[str, int] | None:
     return (tail.group("proc").strip(), int(tail.group("tid"))) if tail is not None else None
 
 
-def _dotdot_fallback(rest: str, matcher: WatchMatcher) -> tuple[tuple[str, int], ...]:
-    """Fail closed on a `..` neither search could resolve (e.g. `/x  y/../.netrc`).
+def _component_fallback(rest: str, matcher: WatchMatcher) -> Found:
+    """Fail closed where the exact searches may be blind (`..`, canonical reordering).
 
     Each watched path whose final component occurs in the line is reported as
     itself (offset: the line's first '/', for the errno lookup).
     """
-    if _DOTDOT.search(rest) is None:
-        return ()
     folded, first = fold_line(rest, matcher), rest.find("/")
     return tuple(
         (p, first) for p in matcher.watch_paths() if _component_key(p, matcher) in folded
     )
+
+
+def _strict_watched(rest: str, matcher: WatchMatcher) -> Found:
+    """The strict parse's path, normalized (it resolves `..` itself), if watched."""
+    strict = _strict(rest)
+    if strict is None or not _watched(strict[0], matcher):
+        return ()
+    return ((_normalize(strict[0]), strict[3]),)
+
+
+def _covers(watched: str, found: str, matcher: WatchMatcher) -> bool:
+    w, f = matcher.normalize(watched), matcher.normalize(found)
+    return f == w or f.startswith(w.rstrip("/") + "/")
+
+
+def _watched_root(path: str, matcher: WatchMatcher) -> str | None:
+    return next((w for w in matcher.watch_paths() if _covers(w, path, matcher)), None)
+
+
+def _component_outside(path: str, rest: str, spans: Spans, matcher: WatchMatcher) -> bool:
+    """True if `path`'s final component occurs in rest outside every exact-match span.
+
+    An occurrence the per-character fold cannot locate (canonical reordering)
+    counts as outside: fail closed.
+    """
+    key = _component_key(path, matcher)
+    if matcher.case_insensitive:
+        haystack, offsets = _fold_with_offsets(rest)
+    else:
+        haystack, offsets = rest, list(range(len(rest) + 1))
+    k = haystack.find(key)
+    if k == -1:
+        return key in fold_line(rest, matcher)
+    while k != -1:
+        if not any(s <= offsets[k] < e for s, e in spans):
+            return True
+        k = haystack.find(key, k + 1)
+    return False
+
+
+def _dotdot_extra(rest: str, found: Found, spans: Spans, matcher: WatchMatcher) -> Found:
+    """I3: watched paths a `/..` may hide behind the paths the exact searches found.
+
+    - the strict parse's target (it resolves `..` itself), when found paths exist
+      and it lies in a different watched root than all of them;
+    - every watched path whose final component occurs outside the found spans,
+      unless something already reported lies at or below it.
+    """
+    extra: list[tuple[str, int]] = []
+    if found:
+        roots = {_watched_root(p, matcher) for p, _ in found}
+        extra.extend(
+            (path, offset) for path, offset in _strict_watched(rest, matcher)
+            if _watched_root(path, matcher) not in roots
+        )
+    for path, offset in _component_fallback(rest, matcher):
+        reported = (*found, *extra)
+        if any(_covers(path, f, matcher) for f, _ in reported):
+            continue
+        if _component_outside(path, rest, spans, matcher):
+            extra.append((path, offset))
+    return tuple(extra)
 
 
 def _attribution(
@@ -288,14 +359,35 @@ def _attribution(
     return original[0], tid, None
 
 
+def _found_paths(rest: str, matcher: WatchMatcher) -> tuple[Found, str | None]:
+    """(watched paths, reason they cannot be attributed or None).
+
+    Exact searches first. A `/..` always adds the strict target and the
+    component fallback (I3); a non-ASCII line the exact searches missed gets
+    the component fallback (canonical reordering can blind the offset map).
+    """
+    found, spans = _loose_spans(rest, matcher)
+    if _DOTDOT.search(rest) is not None:
+        extra = _dotdot_extra(rest, found, spans, matcher)
+        if extra:
+            return (*found, *extra), DOTDOT_MISS
+        return found, None
+    if not found and not rest.isascii():
+        fallback = _component_fallback(rest, matcher)
+        return fallback, NON_ASCII_MISS if fallback else None
+    return found, None
+
+
 def parse_fs_usage_hits(
     line: str, matcher: WatchMatcher, today: date, now: datetime
 ) -> tuple[tuple[FsUsageHit, ...], str | None]:
     """(hits, miss) for one fs_usage line; one hit per distinct watched path.
 
     Invariant: ((), None) only when no candidate path and no watched-path
-    needle in the line is watched, and (if the line has a `/..` segment) no
-    watched path's final component occurs in it. The strict parse (path,
+    needle in the line is watched, and (if the line has a `/..` segment or
+    non-ASCII text) no watched path's final component occurs in it. A `/..`
+    line also reports every watched path named by component or by the strict
+    parse that no found path covers, all flagged. The strict parse (path,
     name.tid) is used only when its path is watched AND is exactly the single
     watched path the loose search found at the same place; otherwise every
     found path is reported with proc_name=UNKNOWN_PROC, tid=None (flagged),
@@ -307,14 +399,13 @@ def parse_fs_usage_hits(
     if head is None or head.group("op") not in RELEVANT_OPS:
         return (), None
     rest = head.group("rest")
-    loose = _loose_paths(rest, matcher)
-    if loose:
-        proc, tid, miss = _attribution(rest, raw, loose, matcher)
+    loose, unsure = _found_paths(rest, matcher)
+    if not loose:
+        return (), None  # no watched path anywhere in the line
+    if unsure is not None:
+        proc, tid, miss = UNKNOWN_PROC, None, unsure
     else:
-        loose = _dotdot_fallback(rest, matcher)
-        if not loose:
-            return (), None  # no watched path anywhere in the line
-        proc, tid, miss = UNKNOWN_PROC, None, DOTDOT_MISS
+        proc, tid, miss = _attribution(rest, raw, loose, matcher)
     timestamp = _timestamp(head.group("ts"), today, now)
     if timestamp is None:
         timestamp = now.astimezone(timezone.utc)
