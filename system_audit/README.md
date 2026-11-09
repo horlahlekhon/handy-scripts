@@ -118,7 +118,13 @@ sudo systemctl restart credwatch
 ```
 
 `install` as root with `sudo` targets the invoking user (`SUDO_USER`) for home-directory
-paths; pass `--user NAME` to override. It is idempotent: rules are rewritten only if
+paths; pass `--user NAME` to override. It writes that user into the service as
+`run ... --user NAME` (systemd `ExecStart`, launchd `ProgramArguments`), because a service
+has no `SUDO_USER`. The name must exist and be a plain login name (no whitespace or
+control characters). `run` and `install` refuse to start when the target user resolves to
+root without an explicit `--user root` ("target user resolved to root; pass --user
+<name> (re-run credwatch install)"), so a unit missing `--user` fails loudly instead of
+watching root's home and flagging every read. It is idempotent: rules are rewritten only if
 content changes, the loaded rule count is always verified (and reloaded if wrong), and
 the service is restarted so config edits apply.
 

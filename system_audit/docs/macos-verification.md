@@ -165,6 +165,17 @@ Expected: `service: running`, `probe: ok (canary access recorded)`, exit code 0.
 probe fails, check `/Library/Application Support/credwatch/logs/launchd.err.log` and the
 Full Disk Access grants, then repeat. Record the actual outcome here.
 
+Check that the daemon watches you, not root:
+
+```bash
+sudo plutil -p /Library/LaunchDaemons/com.credwatch.daemon.plist | grep -A1 '"--user"'  # your short name
+```
+
+With `darwin_trust_name_resolution: true`, also prove an allowed access is recorded as
+`ok`: `ssh -T git@github.com`, then `sudo /opt/pipx/bin/credwatch report --last 5m
+--process ssh`. Under the default (untrusted name resolution) it is expected to show
+`FLAGGED`; see the limitations below.
+
 ## Known macOS limitations (by design)
 
 - **Process attribution; macOS flags nearly everything by default.** fs_usage gives only

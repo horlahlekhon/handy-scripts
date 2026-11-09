@@ -4,7 +4,7 @@ After=auditd.service network-online.target
 Wants=auditd.service network-online.target
 [Service]
 Type=simple
-ExecStart={executable} run --config /etc/credwatch/config.yaml
+ExecStart={executable} run --config /etc/credwatch/config.yaml --user {user}
 EnvironmentFile=/etc/credwatch/secrets.env
 Restart=on-failure
 RestartSec=5

@@ -148,7 +148,9 @@ def test_resolve_system_path_accepts_root_prefix_symlink():
 
 def test_plist_has_keepalive_and_secrets_arg():
     data = plistlib.loads(
-        macos.render_plist(Path("/opt/pipx/bin/credwatch"), Path("/Library/Application Support/credwatch"))
+        macos.render_plist(
+            Path("/opt/pipx/bin/credwatch"), Path("/Library/Application Support/credwatch"), "alice"
+        )
     )
     assert data["Label"] == "com.credwatch.daemon"
     assert data["KeepAlive"] is True and data["RunAtLoad"] is True
@@ -156,20 +158,49 @@ def test_plist_has_keepalive_and_secrets_arg():
     assert args[0] == "/opt/pipx/bin/credwatch"
     assert args[args.index("--secrets-file") + 1] == "/etc/credwatch/secrets.env"
     assert args[args.index("--config") + 1] == "/etc/credwatch/config.yaml"
+    assert args[args.index("--user") + 1] == "alice"
     assert data["StandardOutPath"] == "/Library/Application Support/credwatch/logs/launchd.out.log"
     assert data["StandardErrorPath"] == "/Library/Application Support/credwatch/logs/launchd.err.log"
 
 
 def test_plist_arguments_parse_as_run_command():
-    data = plistlib.loads(macos.render_plist(Path("/x/credwatch"), Path("/d")))
+    data = plistlib.loads(macos.render_plist(Path("/x/credwatch"), Path("/d"), "alice"))
     assert data["ProgramArguments"] == [
         "/x/credwatch", "run", "--config", "/etc/credwatch/config.yaml",
-        "--secrets-file", "/etc/credwatch/secrets.env",
+        "--secrets-file", "/etc/credwatch/secrets.env", "--user", "alice",
     ]
     ns = build_parser().parse_args(data["ProgramArguments"][1:])
-    assert (ns.command, ns.config, ns.secrets_file) == (
-        "run", "/etc/credwatch/config.yaml", "/etc/credwatch/secrets.env",
+    assert (ns.command, ns.config, ns.secrets_file, ns.user) == (
+        "run", "/etc/credwatch/config.yaml", "/etc/credwatch/secrets.env", "alice",
     )
+
+
+def test_installed_plist_user_drives_config_home(env):
+    """The installed argv, run through the real CLI resolution, watches the target's home."""
+    from credwatch.config import load_config
+    from credwatch.platform_info import resolve_target_user
+
+    env.install()
+    ns = build_parser().parse_args(_plist(env)["ProgramArguments"][1:])
+    assert ns.user == env.target.name
+    target = resolve_target_user(ns.user, {})  # launchd: no SUDO_USER
+    assert target.home == Path(ME.pw_dir)
+    cfg = load_config(env.etc / "config.yaml", "darwin", target)
+    ssh_rule = next(r for r in cfg.allowlist if r.path_pattern.endswith("/.ssh/**"))
+    assert ssh_rule.path_pattern == f"{ME.pw_dir}/.ssh/**"
+
+
+@pytest.mark.parametrize("name", ["bad name", "bad\nname", "1abc", ".x", ""])
+def test_macos_install_refuses_invalid_target_user_name(env, name):
+    env_target = TargetUser(name, ME.pw_uid, ME.pw_gid, env.home)
+    with pytest.raises(InstallError, match="user name"):
+        macos.install(env_target, runner=env.runner, root=env.root, owner_uid=os.geteuid(),
+                      executable=env.exe, realpath=_fake_realpath, sleep=env.sleeps.append)
+    assert not (env.root / PLIST).exists()
+
+
+def test_macos_user_name_rules_allow_mixed_case_and_dots():
+    assert common.validate_service_user("Alice.Smith", "darwin", getpwnam=lambda n: n) == "Alice.Smith"
 
 
 # --- full flow --------------------------------------------------------------------

@@ -72,13 +72,14 @@ def resolve_system_path(
     return path
 
 
-def render_plist(executable: Path, data_dir: Path) -> bytes:
+def render_plist(executable: Path, data_dir: Path, user: str) -> bytes:
+    """`user` must already be validated (validate_service_user)."""
     logs = data_dir / LOG_SUBDIR
     return plistlib.dumps({
         "Label": LABEL,
         "ProgramArguments": [
             str(executable), "run", "--config", str(CONFIG_PATH),
-            "--secrets-file", str(SECRETS_PATH),
+            "--secrets-file", str(SECRETS_PATH), "--user", user,
         ],
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -106,8 +107,10 @@ def _set_owner(path: Path, owner_uid: int) -> None:
     os.chown(path, 0, gid, follow_symlinks=False)
 
 
-def _plist(executable: Path, data_dir: Path, plist_path: Path, owner_uid: int) -> StepResult:
-    content = render_plist(executable, data_dir).decode("utf-8")
+def _plist(
+    executable: Path, user: str, data_dir: Path, plist_path: Path, owner_uid: int
+) -> StepResult:
+    content = render_plist(executable, data_dir, user).decode("utf-8")
     changed = write_if_changed(plist_path, content, PLIST_FILE_MODE)
     _set_owner(plist_path, owner_uid)
     return outcome(f"plist {plist_path}", changed)
@@ -159,7 +162,7 @@ def install(
     )
     plist_path = rooted(root, PLIST_PATH)
     result = prepared.result.merge(
-        _plist(prepared.executable, prepared.config.data_dir, plist_path, owner_uid)
+        _plist(prepared.executable, prepared.user, prepared.config.data_dir, plist_path, owner_uid)
     )
     if start:
         _launchctl_load(runner, plist_path, sleep)

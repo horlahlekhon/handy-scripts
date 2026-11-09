@@ -174,7 +174,9 @@ def test_no_start_skips_restart(env):
 def test_unit_renders_executable_path(env):
     env.install()
     unit = (env.root / UNIT).read_text()
-    assert f"ExecStart={env.exe} run --config /etc/credwatch/config.yaml\n" in unit
+    assert (
+        f"ExecStart={env.exe} run --config /etc/credwatch/config.yaml --user {ME.pw_name}\n"
+    ) in unit
     assert "{executable}" not in unit
     assert "EnvironmentFile=/etc/credwatch/secrets.env" in unit
     assert _mode(env.root / UNIT) == 0o644
@@ -381,6 +383,60 @@ def test_execstart_argv_parses_with_cli(env):
     assert argv[0] == str(env.exe)
     ns = build_parser().parse_args(argv[1:])
     assert (ns.command, ns.config, ns.secrets_file) == ("run", "/etc/credwatch/config.yaml", None)
+    assert ns.user == env.target.name
+
+
+def test_execstart_user_drives_config_home(env):
+    """The rendered argv, run through the real CLI resolution, watches the target's home."""
+    import shlex
+
+    from credwatch.cli import build_parser
+    from credwatch.config import load_config
+    from credwatch.platform_info import resolve_target_user
+
+    env.install()
+    line = next(
+        ln for ln in (env.root / UNIT).read_text().splitlines() if ln.startswith("ExecStart=")
+    )
+    ns = build_parser().parse_args(shlex.split(line.removeprefix("ExecStart="))[1:])
+    assert ns.user == env.target.name  # explicit: never falls back to the service's own uid
+    target = resolve_target_user(ns.user, {})  # systemd: no SUDO_USER
+    assert target.name == env.target.name and target.home == Path(ME.pw_dir)
+    cfg = load_config(env.etc / "config.yaml", "linux", target)
+    ssh_rule = next(r for r in cfg.allowlist if r.path_pattern.endswith("/.ssh/**"))
+    assert ssh_rule.path_pattern == f"{ME.pw_dir}/.ssh/**"
+
+
+@pytest.mark.parametrize(
+    "name", ["bad name", "bad\tname", "bad\x1bname", "Bad", "1abc", "a$b", "", "-x"],
+)
+def test_unit_refuses_invalid_target_user_name(env, name):
+    env.target = TargetUser(name, ME.pw_uid, ME.pw_gid, env.home)
+    with pytest.raises(InstallError, match="user name"):
+        run_install("linux", env.target, runner=env.runner, root=env.root,
+                    owner_uid=os.geteuid(), executable=env.exe)
+    assert not (env.root / UNIT).exists()
+    assert not env.data.exists()
+
+
+def test_unit_refuses_target_user_missing_from_pwd(env):
+    ghost = TargetUser("credwatch-no-such-user", ME.pw_uid, ME.pw_gid, env.home)
+    with pytest.raises(InstallError, match="no such user"):
+        run_install("linux", ghost, runner=env.runner, root=env.root,
+                    owner_uid=os.geteuid(), executable=env.exe)
+    assert not (env.root / UNIT).exists()
+
+
+@pytest.mark.parametrize("name", ["alice", "_svc", "a-b_c9", "machine$"])
+def test_linux_user_name_rules_accept_portable_names(name):
+    assert common.validate_service_user(name, "linux", getpwnam=lambda n: n) == name
+
+
+def test_render_unit_places_user_after_run():
+    unit = linux.render_unit(Path("/opt/pipx/bin/credwatch"), "alice")
+    assert (
+        "ExecStart=/opt/pipx/bin/credwatch run --config /etc/credwatch/config.yaml --user alice\n"
+    ) in unit
 
 
 def test_install_rejects_unsafe_executable_before_writing(env, monkeypatch):

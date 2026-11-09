@@ -35,11 +35,17 @@ UNIT_PATH = Path("/etc/systemd/system/credwatch.service")
 UNIT_TEMPLATE = "credwatch.service"
 UNIT_FILE_MODE = 0o644
 EXECUTABLE_PLACEHOLDER = "{executable}"
+USER_PLACEHOLDER = "{user}"
 NEEDS_RELOAD = "yes"
 
 
-def render_unit(executable: Path) -> str:
-    return template_text(UNIT_TEMPLATE).replace(EXECUTABLE_PLACEHOLDER, str(executable))
+def render_unit(executable: Path, user: str) -> str:
+    """`user` must already be validated (validate_service_user): it lands in ExecStart."""
+    return (
+        template_text(UNIT_TEMPLATE)
+        .replace(EXECUTABLE_PLACEHOLDER, str(executable))
+        .replace(USER_PLACEHOLDER, user)
+    )
 
 
 def _systemctl(runner: Runner, *args: str) -> None:
@@ -72,8 +78,8 @@ def _needs_daemon_reload(runner: Runner) -> bool:
     return (result.stdout or "").strip() == NEEDS_RELOAD
 
 
-def _unit(executable: Path, unit_path: Path, runner: Runner) -> StepResult:
-    changed = write_if_changed(unit_path, render_unit(executable), UNIT_FILE_MODE)
+def _unit(executable: Path, user: str, unit_path: Path, runner: Runner) -> StepResult:
+    changed = write_if_changed(unit_path, render_unit(executable, user), UNIT_FILE_MODE)
     if changed or _needs_daemon_reload(runner):
         _systemctl(runner, "daemon-reload")
     return outcome(f"unit {unit_path}", changed)
@@ -97,7 +103,7 @@ def install(
     result = (
         prepared.result
         .merge(_audit_rules(paths, rooted(root, DEFAULT_RULES_FILE), runner))
-        .merge(_unit(prepared.executable, rooted(root, UNIT_PATH), runner))
+        .merge(_unit(prepared.executable, prepared.user, rooted(root, UNIT_PATH), runner))
     )
     _systemctl(runner, "enable", SERVICE_NAME)
     if start:

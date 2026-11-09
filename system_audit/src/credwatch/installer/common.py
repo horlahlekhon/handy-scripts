@@ -10,6 +10,7 @@ import errno
 import logging
 import os
 import pwd
+import re
 import shutil
 import stat
 import sys
@@ -57,6 +58,13 @@ _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _SYMLINK_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 _WRITABLE_BY_OTHERS = stat.S_IWGRP | stat.S_IWOTH
+# Service user names rendered into the unit/plist argv (`run --user <name>`).
+# Linux: the portable useradd/NAME_REGEX form. macOS short names also allow
+# upper case and dots. Neither allows whitespace or control characters.
+_USER_NAME_RE = {
+    "linux": re.compile(r"[a-z_][a-z0-9_-]*[$]?"),
+    "darwin": re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*"),
+}
 
 
 class InstallError(RuntimeError):
@@ -441,6 +449,22 @@ def validate_executable(executable: Path) -> None:
         )
 
 
+def validate_service_user(
+    name: str, os_name: str, *, getpwnam: Callable[[str], Any] = pwd.getpwnam
+) -> str:
+    """The target user name the service runs `--user` with; refuse anything unsafe."""
+    if any(ch.isspace() or not ch.isprintable() for ch in name):
+        raise InstallError(f"target user name contains whitespace/control characters: {name!r}")
+    pattern = _USER_NAME_RE.get(os_name, _USER_NAME_RE["linux"])
+    if not pattern.fullmatch(name):
+        raise InstallError(f"target user name {name!r} is not a valid {os_name} user name")
+    try:
+        getpwnam(name)
+    except KeyError as exc:
+        raise InstallError(f"no such user: {name!r}") from exc
+    return name
+
+
 def _config_files(config_dir: Path, owner_uid: int) -> StepResult:
     config_path = config_dir / CONFIG_PATH.name
     secrets_path = config_dir / SECRETS_PATH.name
@@ -481,6 +505,7 @@ class PreparedInstall:
     """Outcome of the OS-neutral steps; the OS module adds its service on top."""
 
     executable: Path
+    user: str  # validated target user name for the service's `--user`
     config: Config  # as loaded: real system paths (what the service will see)
     paths: tuple[Path, ...]  # watched paths written to the watch list
     result: StepResult
@@ -503,6 +528,7 @@ def prepare_install(
     """
     if os.geteuid() != owner_uid:
         raise InstallError("credwatch install must be run as root (sudo credwatch install)")
+    user = validate_service_user(target.name, os_name)
     exe = executable or find_executable()
     validate_executable(exe)
     trust_check(exe, Path(sys.prefix))
@@ -522,4 +548,4 @@ def prepare_install(
     result = result.merge(StepResult(warnings=link_warnings)).merge(
         _watch_list(paths, local_config_dir / WATCH_LIST_PATH.name)
     )
-    return PreparedInstall(executable=exe, config=cfg, paths=paths, result=result)
+    return PreparedInstall(executable=exe, user=user, config=cfg, paths=paths, result=result)

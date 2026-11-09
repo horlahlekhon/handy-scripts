@@ -101,6 +101,18 @@ def _now() -> datetime:
 # --- shared setup -------------------------------------------------------------------
 
 
+ROOT_TARGET_ERROR = "target user resolved to root; pass --user <name> (re-run credwatch install)"
+
+
+def _implicit_root_target(args: argparse.Namespace) -> bool:
+    """True when no --user was given and the fallback (SUDO_USER/uid) is root.
+
+    Under systemd/launchd there is no SUDO_USER, so a unit without --user
+    would watch root's home and flag every legitimate read. Fail loudly.
+    """
+    return args.user is None and resolve_target_user(None, os.environ).uid == 0
+
+
 def _load_config(args: argparse.Namespace) -> Config:
     os_name = current_os()
     target = resolve_target_user(args.user, os.environ)
@@ -172,6 +184,10 @@ def _check_mail_setup(config: Config, secrets: Path | None, store: Store) -> Non
 @_guarded
 def cmd_run(args: argparse.Namespace) -> int:
     if not _require_root("run"):
+        return EXIT_USAGE
+    if _implicit_root_target(args):
+        logger.error(ROOT_TARGET_ERROR)
+        print(f"credwatch run: {ROOT_TARGET_ERROR}", file=sys.stderr)
         return EXIT_USAGE
     config = _load_config(args)
     logging_setup.configure(
@@ -504,6 +520,10 @@ def cmd_install(args: argparse.Namespace) -> int:
     from credwatch.installer import InstallError
 
     try:
+        if _implicit_root_target(args):
+            logger.error(ROOT_TARGET_ERROR)
+            print(f"credwatch install: {ROOT_TARGET_ERROR}", file=sys.stderr)
+            return EXIT_USAGE
         target = resolve_target_user(args.user, os.environ)
         report = run_install(
             current_os(), target, runner=SubprocessRunner(), start=not args.no_start

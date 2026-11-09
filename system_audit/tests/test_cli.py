@@ -382,6 +382,44 @@ def test_run_startup_failure_returns_nonzero(run_env, monkeypatch, capsys):
     assert "no backend here" in capsys.readouterr().err
 
 
+ROOT_TARGET = TargetUser("root", 0, 0, Path("/root"))
+
+
+def test_run_refuses_implicit_root_target(run_env, monkeypatch, capsys):
+    """systemd/launchd have no SUDO_USER: a unit without --user must fail loudly."""
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(cli, "resolve_target_user", lambda explicit, environ: ROOT_TARGET)
+    FakeDaemon.last = None
+    assert cli.main([*run_env["argv"], "run"]) == 2
+    err = capsys.readouterr().err
+    assert "target user resolved to root; pass --user <name> (re-run credwatch install)" in err
+    assert FakeDaemon.last is None
+    assert not (run_env["data"] / "events.db").exists()
+
+
+def test_run_refuses_root_from_sudo_user_root(run_env, monkeypatch, capsys):
+    monkeypatch.setenv("SUDO_USER", "root")
+    assert cli.main([*run_env["argv"], "run"]) == 2
+    assert "target user resolved to root" in capsys.readouterr().err
+
+
+def test_run_allows_explicit_user_root(run_env, monkeypatch):
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    FakeDaemon.last = None
+    assert cli.main([*run_env["argv"], "--user", "root", "run"]) == 0
+    assert FakeDaemon.last is not None
+    assert FakeDaemon.last.args[0].home == Path(__import__("pwd").getpwnam("root").pw_dir)
+
+
+def test_install_refuses_implicit_root_target(env, monkeypatch, capsys):
+    calls = _fake_install(monkeypatch)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(cli, "resolve_target_user", lambda explicit, environ: ROOT_TARGET)
+    assert cli.main([*env["argv"], "install"]) == 2
+    assert "target user resolved to root" in capsys.readouterr().err
+    assert calls == []
+
+
 def test_late_binding_before_daemon_exists_only_logs(caplog):
     ref = cli._DaemonRef()
     ref.problem("p")

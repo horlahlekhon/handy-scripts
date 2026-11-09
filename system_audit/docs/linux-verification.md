@@ -153,7 +153,14 @@ sudo credwatch install
 ```
 
 Expected: a per-step install report (data dir and canary, config, audit rules, systemd
-unit, service start) with no errors; re-running it reports everything unchanged. Then:
+unit, service start) with no errors; re-running it reports everything unchanged. Check
+that the unit watches you, not root:
+
+```bash
+grep ExecStart /etc/systemd/system/credwatch.service   # must end in `--user <your login>`
+```
+
+Then:
 
 ```bash
 sudoedit /etc/credwatch/secrets.env       # set CREDWATCH_SMTP_USER and CREDWATCH_SMTP_PASSWORD
@@ -177,6 +184,14 @@ and the path, with the network snapshot. Confirm in the store:
 
 ```bash
 sudo credwatch report --last 10m --flagged --format table
+```
+
+Prove an *allowed* access is recorded as `ok` (this validates the target user and the
+allowlist end to end; if it shows `FLAGGED`, the service is watching the wrong home):
+
+```bash
+ssh -T git@github.com                      # reads ~/.ssh as /usr/bin/ssh (any exit code is fine)
+sudo credwatch report --last 5m --process ssh --format table   # VERDICT column: ok
 ```
 
 Restart the service and re-check status afterwards:
