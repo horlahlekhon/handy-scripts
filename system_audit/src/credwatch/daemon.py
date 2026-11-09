@@ -545,6 +545,3 @@ def run_forever(daemon: Daemon) -> None:
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-
-
-178788128900527
