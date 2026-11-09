@@ -254,6 +254,19 @@ Safe to repeat: existing files are reported `unchanged:`, audit rules are not
 duplicated, the rule count is verified, and the service restarts. Use `--no-start` to
 skip the (re)start.
 
+The `.env` scan never descends into a watched directory (`~/.ssh`, `~/.gnupg`,
+`~/.config/op`, any directory in `extra_paths`, and their symlink targets): those
+already carry a directory watch, so opening them would audit the installer's own scan.
+Elsewhere install only `lstat`s watched paths, which is not an audited read. Two
+self-events remain on a re-run, and both are expected:
+
+- **Allowed:** install opens the canary (`<data_dir>/canary`) to verify it. It is
+  recorded `ok` with rule `credwatch-canary`.
+- **Flagged, Linux only, only if you have one:** a watched path that is itself a
+  symlink (for example a dotfiles-managed `~/.npmrc`) is resolved with `readlink`,
+  which auditd counts as a read. It shows up once per install as a `python3.x` access
+  to that link. fs_usage does not report `readlink`, so macOS has no such event.
+
 ## Verifying
 
 ```bash

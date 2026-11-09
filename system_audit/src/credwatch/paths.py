@@ -5,7 +5,7 @@ import logging
 import os
 import tempfile
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 from pathlib import Path
 
 from credwatch.config import Config, EnvScanConfig
@@ -59,10 +59,21 @@ def _log_walk_error(exc: OSError) -> None:
     logger.warning("env scan: cannot read directory %s: %s", exc.filename, exc.strerror)
 
 
-def scan_env_files(cfg: EnvScanConfig) -> tuple[Path, ...]:
+def scan_env_files(
+    cfg: EnvScanConfig, watched_dirs: Set[Path] = frozenset()
+) -> tuple[Path, ...]:
+    """Find `.env*` files under the scan roots.
+
+    `watched_dirs` are never opened: they already carry a directory watch, so
+    descending into them (as root, at install time) would audit our own scan
+    and alert on it. Their contents are covered by that watch anyway.
+    """
     found: set[Path] = set()
     for root in cfg.roots:
         root_str = str(root)
+        if Path(root_str) in watched_dirs:
+            logger.info("env scan: root %s is a watched directory; not scanning it", root_str)
+            continue
         for dirpath, dirnames, filenames in os.walk(
             root_str, followlinks=False, onerror=_log_walk_error
         ):
@@ -70,7 +81,8 @@ def scan_env_files(cfg: EnvScanConfig) -> tuple[Path, ...]:
             depth = 0 if rel == "." else rel.count(os.sep) + 1
             # In-place pruning is how os.walk is steered.
             dirnames[:] = [] if depth >= cfg.max_depth else [
-                d for d in dirnames if d not in cfg.excludes
+                d for d in dirnames
+                if d not in cfg.excludes and Path(dirpath, d) not in watched_dirs
             ]
             for f in filenames:
                 candidate = Path(dirpath) / f
@@ -112,14 +124,24 @@ def _with_resolved(path: Path, homes: tuple[Path, ...]) -> tuple[tuple[Path, ...
 SkippedTarget = tuple[Path, Path]
 
 
+def _watched_dirs(static: tuple[Path, ...], homes: tuple[Path, ...]) -> frozenset[Path]:
+    """Directories that will carry a watch (link and resolved form): the env scan skips them."""
+    dirs = {
+        q
+        for p in static
+        if _is_safe(p) and os.path.isdir(p)
+        for q in (p, _resolve(p) or p)
+    }
+    return frozenset(d for d in dirs if not _is_home_or_ancestor(d, homes))
+
+
 def resolve_watch_paths_report(cfg: Config) -> tuple[tuple[Path, ...], tuple[SkippedTarget, ...]]:
     """Watch paths plus (link, target) pairs whose target was not watched (outside home/unsafe)."""
     homes = tuple({cfg.home, _resolve(cfg.home) or cfg.home})
-    defaults = (_expand_home(p, cfg.home) for p in DEFAULT_SENSITIVE_PATHS)
+    static = (*(_expand_home(p, cfg.home) for p in DEFAULT_SENSITIVE_PATHS), *cfg.extra_paths)
     candidates = (
-        *defaults,
-        *cfg.extra_paths,
-        *scan_env_files(cfg.env_scan),
+        *static,
+        *scan_env_files(cfg.env_scan, _watched_dirs(static, homes)),
         cfg.data_dir / "canary",
     )
     existing = {p for p in candidates if _is_safe(p) and os.path.lexists(p)}

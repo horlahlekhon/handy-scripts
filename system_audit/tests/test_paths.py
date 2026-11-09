@@ -85,6 +85,98 @@ def test_env_scan_respects_excludes_and_depth(home):
     assert home / "a" / "b" / "c" / "d" / ".env" in found
 
 
+def _record_walk(monkeypatch) -> list[str]:
+    """Record every directory os.walk actually opens (pruning must still take effect)."""
+    visited: list[str] = []
+    real_walk = os.walk
+
+    def walk(top, *a, **k):
+        for entry in real_walk(top, *a, **k):
+            visited.append(entry[0])
+            yield entry
+
+    monkeypatch.setattr(os, "walk", walk)
+    return visited
+
+
+def test_env_scan_never_descends_into_watched_dirs(home, monkeypatch):
+    for d in (".ssh", ".gnupg", ".config/op", "custom-secrets", "proj"):
+        (home / d / "sub").mkdir(parents=True)
+        (home / d / ".env").write_text("x")
+    visited = _record_walk(monkeypatch)
+    cfg = EnvScanConfig(roots=(home,), max_depth=4, excludes=())
+    watched = frozenset({home / ".ssh", home / ".gnupg", home / ".config" / "op",
+                         home / "custom-secrets"})
+    found = scan_env_files(cfg, watched_dirs=watched)
+    assert found == (home / "proj" / ".env",)
+    opened = {Path(v) for v in visited}
+    assert opened.isdisjoint(watched)
+    assert not any(w in v.parents for v in opened for w in watched)
+    assert home / "proj" / "sub" in opened
+
+
+def test_env_scan_skips_root_that_is_watched(home, monkeypatch):
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / ".env").write_text("x")
+    visited = _record_walk(monkeypatch)
+    cfg = EnvScanConfig(roots=(home / ".ssh",), max_depth=2, excludes=())
+    assert scan_env_files(cfg, watched_dirs=frozenset({home / ".ssh"})) == ()
+    assert visited == []
+
+
+def test_resolve_watch_paths_prunes_watched_dirs_from_env_scan(cfg, home, monkeypatch):
+    """install's scan must not open ~/.ssh, ~/.gnupg or extra watched dirs (I1 self-events)."""
+    for d in (".ssh", ".gnupg", "vault", "dotfiles/gnupg-real"):
+        (home / d).mkdir(parents=True)
+    (home / ".config").mkdir()
+    (home / ".config" / "op").symlink_to(home / "dotfiles" / "gnupg-real")
+    (home / "app").mkdir()
+    (home / "app" / ".env").write_text("x")
+    visited = _record_walk(monkeypatch)
+    cfg = replace(cfg, extra_paths=(home / "vault",))
+    paths = resolve_watch_paths(cfg)
+    assert home / "app" / ".env" in paths
+    opened = {Path(v) for v in visited}
+    for watched in (home / ".ssh", home / ".gnupg", home / "vault",
+                    home / "dotfiles" / "gnupg-real"):
+        assert watched in paths
+        assert watched not in opened
+
+
+def test_watch_path_resolution_reads_no_watched_path(cfg, home, monkeypatch):
+    """What install does to watched paths: no open/scandir; readlink only on a watched symlink.
+
+    lstat/stat are not audited reads (auditd -p r, fs_usage open ops), so the only
+    remaining install-time self-event is resolving a watched symlink's target.
+    """
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_ed25519").write_text("k")
+    (home / ".aws").mkdir()
+    (home / ".aws" / "credentials").write_text("x")
+    (home / "dotfiles").mkdir()
+    (home / "dotfiles" / "npmrc").write_text("x")
+    (home / ".npmrc").symlink_to(home / "dotfiles" / "npmrc")
+    (home / "app").mkdir()
+    (home / "app" / ".env").write_text("x")
+    touched: dict[str, list[str]] = {"scandir": [], "open": [], "readlink": []}
+    for name in touched:
+        real = getattr(os, name)
+
+        def spy(path, *a, _real=real, _name=name, **k):
+            touched[_name].append(os.fsdecode(path) if not isinstance(path, int) else "<fd>")
+            return _real(path, *a, **k)
+
+        monkeypatch.setattr(os, name, spy)
+    paths = resolve_watch_paths(cfg)
+    watched = {str(p) for p in paths}
+
+    def hits(name):
+        return [t for t in touched[name] if any(t == w or t.startswith(w + "/") for w in watched)]
+
+    assert hits("scandir") == [] and hits("open") == []
+    assert hits("readlink") == [str(home / ".npmrc")]
+
+
 def test_env_scan_logs_unreadable_dir(tmp_path, caplog):
     cfg = EnvScanConfig(roots=(tmp_path / "missing",), max_depth=2, excludes=())
     with caplog.at_level(logging.WARNING):
