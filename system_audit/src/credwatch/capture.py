@@ -30,6 +30,10 @@ CAPTURE_DIR_MODE = 0o700
 TERMINATE_WAIT_SECONDS = 5
 MAX_BACKOFF_EXPONENT = 10
 ROOT_USER = "root"
+MIB = 1024 * 1024
+PRUNE_INTERVAL_SECONDS = 60  # size pruning cannot wait a whole rotation period
+PAUSED_POLL_SECONDS = 1.0
+PAUSED_NOTE = "packet capture paused"
 
 
 def build_tcpdump_argv(cfg: CaptureConfig, out_dir: Path) -> list[str]:
@@ -46,10 +50,46 @@ def list_captures(out_dir: Path) -> list[Path]:
     return [p for p in sorted(out_dir.glob(PCAP_GLOB)) if not p.is_symlink() and p.is_file()]
 
 
-def prune_captures(out_dir: Path, keep: int) -> tuple[Path, ...]:
-    """Delete the oldest captures beyond `keep`; the newest file is never deleted."""
+def _file_size(path: Path) -> int:
+    return path.lstat().st_size
+
+
+def _sizes(files: list[Path]) -> list[int]:
+    sizes = []
+    for path in files:
+        try:
+            sizes.append(_file_size(path))
+        except OSError:
+            logger.warning("cannot size capture %s; counting it as 0 bytes", path, exc_info=True)
+            sizes.append(0)
+    return sizes
+
+
+def _over_budget(files: list[Path], max_total_bytes: int | None) -> list[Path]:
+    """Oldest-first files to drop so the total fits; the last (newest) file always stays."""
+    if max_total_bytes is None or not files:
+        return []
+    sizes = _sizes(files)
+    total = sum(sizes)
+    doomed: list[Path] = []
+    for path, size in zip(files[:-1], sizes[:-1]):
+        if total <= max_total_bytes:
+            break
+        doomed.append(path)
+        total -= size
+    return doomed
+
+
+def prune_captures(
+    out_dir: Path, keep: int, max_total_bytes: int | None = None
+) -> tuple[Path, ...]:
+    """Delete the oldest captures beyond `keep` files or `max_total_bytes` in total.
+
+    The newest file (the one tcpdump is writing) is never deleted.
+    """
     files = list_captures(out_dir)
-    doomed = files[: max(len(files) - max(keep, 1), 0)]
+    by_count = files[: max(len(files) - max(keep, 1), 0)]
+    doomed = by_count + _over_budget(files[len(by_count):], max_total_bytes)
     deleted: list[Path] = []
     for path in doomed:
         try:
@@ -62,12 +102,33 @@ def prune_captures(out_dir: Path, keep: int) -> tuple[Path, ...]:
     return tuple(deleted)
 
 
+def disk_space_problem(
+    path: Path, min_free_percent: int, min_free_mb: int, *, statvfs=os.statvfs
+) -> str | None:
+    """A problem string when the filesystem holding `path` is below either floor."""
+    try:
+        st = statvfs(path)
+    except OSError as exc:
+        logger.warning("cannot check free space on %s: %s", path, exc)
+        return f"cannot check free space on {path}: {exc}"
+    free = st.f_bavail * st.f_frsize
+    total = st.f_blocks * st.f_frsize
+    percent = 100.0 * free / total if total else 100.0
+    if percent >= min_free_percent and free >= min_free_mb * MIB:
+        return None
+    return (
+        f"low disk space on {path}: {free // MIB} MiB free ({percent:.1f}%), below "
+        f"{min_free_mb} MiB / {min_free_percent}%; {PAUSED_NOTE} until space recovers"
+    )
+
+
 @dataclass(frozen=True)
 class CaptureStatus:
     running: bool
     restarts: int
     last_error: str | None
     newest_file: Path | None
+    paused: bool = False  # stopped on purpose: low disk space
 
 
 def _read_tail(stderr_file) -> str:
@@ -93,6 +154,7 @@ class CaptureSupervisor:
         clock: Callable[[], float] = time.monotonic,
         getpwnam=pwd.getpwnam,
         stat_fn=os.stat,
+        statvfs=None,
     ) -> None:
         self._cfg = cfg
         self._out_dir = out_dir
@@ -102,7 +164,9 @@ class CaptureSupervisor:
         self._clock = clock
         self._getpwnam = getpwnam
         self._stat = stat_fn
+        self._statvfs = statvfs or os.statvfs
         self._stop = threading.Event()
+        self._space_low = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._proc = None
@@ -136,7 +200,28 @@ class CaptureSupervisor:
             proc = self._proc
         running = proc is not None and proc.poll() is None
         files = list_captures(self._out_dir)
-        return CaptureStatus(running, self._restarts, self._last_error, files[-1] if files else None)
+        return CaptureStatus(
+            running, self._restarts, self._last_error, files[-1] if files else None,
+            self._space_low.is_set(),
+        )
+
+    def check_disk_space(self) -> str | None:
+        """Pause tcpdump while the data filesystem is low on space; resume when it recovers.
+
+        Called from the daemon's health tick and from the capture thread's prune.
+        Returns the problem to report, or None.
+        """
+        problem = disk_space_problem(
+            self._out_dir, self._cfg.min_free_percent, self._cfg.min_free_mb,
+            statvfs=self._statvfs,
+        )
+        if problem is not None and not self._space_low.is_set():
+            logger.error("%s", problem)
+            self._space_low.set()
+        elif problem is None and self._space_low.is_set():
+            logger.warning("disk space recovered on %s; resuming packet capture", self._out_dir)
+            self._space_low.clear()
+        return problem
 
     def _check_privilege_drop(self) -> str | None:
         user = self._cfg.drop_privileges_to
@@ -158,13 +243,23 @@ class CaptureSupervisor:
         return None
 
     def _prune(self) -> None:
-        prune_captures(self._out_dir, self._cfg.retain_files)
+        prune_captures(self._out_dir, self._cfg.retain_files, self._cfg.max_total_mb * MIB)
+        self.check_disk_space()
         self._last_prune = self._clock()
+
+    def _prune_due(self) -> bool:
+        interval = min(self._cfg.rotate_seconds, PRUNE_INTERVAL_SECONDS)
+        return self._clock() - self._last_prune >= interval
 
     def _run(self) -> None:
         failures = 0
         self._guarded(self._prune)
         while not self._stop.is_set():
+            if self._space_low.is_set():
+                self._stop.wait(PAUSED_POLL_SECONDS)
+                if self._prune_due():
+                    self._guarded(self._prune)
+                continue
             started = self._clock()
             try:
                 error = self._run_once()
@@ -173,6 +268,9 @@ class CaptureSupervisor:
                 error = f"supervisor error: {exc!r}"
             if self._stop.is_set():
                 break
+            if self._space_low.is_set():
+                logger.warning("tcpdump stopped: %s", PAUSED_NOTE)
+                continue
             if self._clock() - started >= BACKOFF_RESET_UPTIME_SECONDS:
                 failures = 0
             delay = min(BACKOFF_BASE_SECONDS * 2 ** min(failures, MAX_BACKOFF_EXPONENT), BACKOFF_MAX_SECONDS)
@@ -222,12 +320,16 @@ class CaptureSupervisor:
                 if self._stop.is_set():
                     return ""
                 logger.info("tcpdump started: %s", " ".join(argv))
-                while proc.poll() is None and not self._stop.is_set():
-                    if self._clock() - self._last_prune >= self._cfg.rotate_seconds:
+                while (
+                    proc.poll() is None
+                    and not self._stop.is_set()
+                    and not self._space_low.is_set()
+                ):
+                    if self._prune_due():
                         self._guarded(self._prune)
                     self._stop.wait(POLL_INTERVAL_SECONDS)
                 code = proc.poll()
-                if self._stop.is_set():
+                if self._stop.is_set() or self._space_low.is_set():
                     return ""
                 tail = _read_tail(stderr_file)
                 logger.warning("tcpdump exited with code %s", code)

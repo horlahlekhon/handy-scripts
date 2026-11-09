@@ -374,10 +374,17 @@ class Daemon:
             problems.append(f"backend health check failed: {type(exc).__name__}: {exc}")
         if self._reader is not None and not self._reader.is_alive() and not self._stop.is_set():
             problems.append("backend reader thread not running")
+        try:
+            space = self._capture.check_disk_space()
+            if space is not None:
+                problems.append(space)
+        except Exception as exc:
+            logger.exception("disk space check failed")
+            problems.append(f"disk space check failed: {type(exc).__name__}: {exc}")
         if self._config.capture.enabled:
             try:
                 status = self._capture.status()
-                if not status.running:
+                if not status.running and not status.paused:
                     suffix = f": {status.last_error}" if status.last_error else ""
                     problems.append(f"packet capture not running{suffix}")
             except Exception as exc:

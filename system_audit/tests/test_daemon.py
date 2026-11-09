@@ -138,12 +138,23 @@ class FakeDispatcher:
 
 class FakeCapture:
     def __init__(self, log: list | None = None, running=True, last_error=None,
-                 start_error=None, status_error=None):
+                 start_error=None, status_error=None, disk_problem=None, disk_error=None,
+                 paused=False):
         self.log = log if log is not None else []
         self.running = running
         self.last_error = last_error
         self.start_error = start_error
         self.status_error = status_error
+        self.disk_problem = disk_problem
+        self.disk_error = disk_error
+        self.paused = paused
+        self.disk_checks = 0
+
+    def check_disk_space(self):
+        self.disk_checks += 1
+        if self.disk_error:
+            raise self.disk_error
+        return self.disk_problem
 
     def start(self):
         if self.start_error:
@@ -155,7 +166,7 @@ class FakeCapture:
     def status(self):
         if self.status_error:
             raise self.status_error
-        return CaptureStatus(self.running, 0, self.last_error, None)
+        return CaptureStatus(self.running, 0, self.last_error, None, self.paused)
 
 
 class FlakyStore(Store):
@@ -584,6 +595,50 @@ def test_capture_disabled_is_not_a_health_problem(tmp_path, data_dir, store):
         h.step()
 
     assert dispatcher.subjects("DEGRADED") == []
+
+
+LOW_DISK = "low disk space on /d/captures: 100 MiB free (1.0%); packet capture paused"
+
+
+@pytest.mark.parametrize("capture_enabled", [True, False])
+def test_low_disk_space_is_a_health_problem(tmp_path, data_dir, store, capture_enabled):
+    config = make_config(tmp_path, data_dir, capture_enabled=capture_enabled)
+    dispatcher = FakeDispatcher()
+    capture = FakeCapture(running=False, paused=True, disk_problem=LOW_DISK)
+    d = make_daemon(config, store, dispatcher=dispatcher, capture=capture)
+    with Harness(d) as h:
+        h.step()
+
+    assert capture.disk_checks == 1
+    body = dispatcher.bodies("DEGRADED")[0]
+    assert LOW_DISK in body
+    assert "packet capture not running" not in body  # paused on purpose, said once
+
+
+def test_disk_space_recovery_clears_health_problem(config, store):
+    dispatcher = FakeDispatcher()
+    clock = FakeClock()
+    capture = FakeCapture(running=False, paused=True, disk_problem=LOW_DISK)
+    d = make_daemon(config, store, dispatcher=dispatcher, capture=capture, clock=clock)
+    with Harness(d) as h:
+        h.step()
+        capture.disk_problem, capture.paused, capture.running = None, False, True
+        clock.advance(daemon_mod.HEALTH_INTERVAL_SECONDS)
+        h.step()
+
+    assert d._health_problems == ()
+    assert len(dispatcher.bodies("DEGRADED")) == 1
+
+
+def test_disk_space_check_error_is_a_health_problem(config, store):
+    dispatcher = FakeDispatcher()
+    d = make_daemon(config, store, dispatcher=dispatcher,
+                    capture=FakeCapture(disk_error=RuntimeError("statvfs broke")))
+    with Harness(d) as h:
+        h.step()
+
+    body = dispatcher.bodies("DEGRADED")[0]
+    assert "disk space check failed: RuntimeError: statvfs broke" in body
 
 
 def test_capture_status_error_still_reports_backend_problems(config, store):

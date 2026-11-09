@@ -3,14 +3,29 @@ import os
 import subprocess
 import types
 
-from credwatch.capture import CaptureSupervisor, build_tcpdump_argv, prune_captures
+import pytest
+
+from credwatch.capture import (
+    CaptureSupervisor,
+    build_tcpdump_argv,
+    disk_space_problem,
+    prune_captures,
+)
 from credwatch.config import CaptureConfig
 
+MIB = 1024 * 1024
 
-def _cfg(enabled=True, rotate=60, keep=3, user="root"):
+
+@pytest.fixture(autouse=True)
+def _roomy_disk(monkeypatch):
+    """Supervisors built without a statvfs seam must not depend on the host's free space."""
+    monkeypatch.setattr(os, "statvfs", _vfs(free_mb=99999, total_mb=999999))
+
+
+def _cfg(enabled=True, rotate=60, keep=3, user="root", **kw):
     return CaptureConfig(
         enabled=enabled, interface="eth0", rotate_seconds=rotate, retain_files=keep, snaplen=128,
-        drop_privileges_to=user,
+        drop_privileges_to=user, **kw,
     )
 
 
@@ -54,6 +69,76 @@ def test_prune_skips_symlinks_and_missing_dir(tmp_path):
     assert deleted == (tmp_path / "credwatch-20260101-000002.pcap",)
     assert link.is_symlink() and target.exists()
     assert prune_captures(tmp_path / "nope", 1) == ()
+
+
+def _sized(d, sizes):
+    names = [f"credwatch-20260101-00000{i}.pcap" for i in range(len(sizes))]
+    for name, size in zip(names, sizes):
+        with open(d / name, "wb") as fh:
+            fh.truncate(size)
+    return names
+
+
+def test_prune_by_total_bytes_oldest_first(tmp_path):
+    names = _sized(tmp_path, [4 * MIB, 3 * MIB, 2 * MIB, 1 * MIB])
+    deleted = prune_captures(tmp_path, 100, max_total_bytes=4 * MIB)
+    assert deleted == (tmp_path / names[0], tmp_path / names[1])
+    assert sorted(p.name for p in tmp_path.iterdir()) == names[2:]
+
+
+def test_prune_by_bytes_never_deletes_newest(tmp_path):
+    names = _sized(tmp_path, [1 * MIB, 9 * MIB])
+    deleted = prune_captures(tmp_path, 100, max_total_bytes=2 * MIB)
+    assert deleted == (tmp_path / names[0],)
+    assert [p.name for p in tmp_path.iterdir()] == [names[1]]
+
+
+def test_prune_count_and_bytes_combine(tmp_path):
+    names = _sized(tmp_path, [1 * MIB, 1 * MIB, 5 * MIB, 1 * MIB])
+    deleted = prune_captures(tmp_path, 3, max_total_bytes=3 * MIB)
+    assert deleted == tuple(tmp_path / n for n in names[:3])
+
+
+def test_prune_unstatable_file_logged_and_counted_as_zero(tmp_path, monkeypatch, caplog):
+    names = _sized(tmp_path, [3 * MIB, 3 * MIB, 1 * MIB])
+    from credwatch import capture as capture_mod
+
+    real_size = capture_mod._file_size
+
+    def flaky(path):
+        if path.name == names[1]:
+            raise PermissionError(13, "denied", str(path))
+        return real_size(path)
+
+    monkeypatch.setattr(capture_mod, "_file_size", flaky)
+    deleted = prune_captures(tmp_path, 100, max_total_bytes=2 * MIB)
+    assert deleted == (tmp_path / names[0],)
+    assert "cannot size capture" in caplog.text
+
+
+def _vfs(free_mb, total_mb, frsize=4096):
+    blocks = total_mb * MIB // frsize
+    avail = free_mb * MIB // frsize
+    return lambda path: types.SimpleNamespace(f_frsize=frsize, f_blocks=blocks, f_bavail=avail)
+
+
+def test_disk_space_problem_thresholds(tmp_path):
+    ok = disk_space_problem(tmp_path, 5, 1024, statvfs=_vfs(free_mb=2048, total_mb=10240))
+    assert ok is None
+    low_pct = disk_space_problem(tmp_path, 5, 1024, statvfs=_vfs(free_mb=4000, total_mb=100000))
+    assert low_pct is not None and "4000 MiB free (4.0%)" in low_pct
+    low_abs = disk_space_problem(tmp_path, 5, 1024, statvfs=_vfs(free_mb=900, total_mb=1000))
+    assert low_abs is not None and "900 MiB free" in low_abs
+    assert str(tmp_path) in low_abs
+
+
+def test_disk_space_problem_statvfs_error_is_reported(tmp_path, caplog):
+    def broken(path):
+        raise OSError(5, "I/O error")
+
+    problem = disk_space_problem(tmp_path, 5, 1024, statvfs=broken)
+    assert problem is not None and "cannot check free space" in problem
+    assert "free space" in caplog.text
 
 
 class FakeProc:
@@ -355,3 +440,56 @@ def test_unprivileged_user_with_correct_dir_spawns(tmp_path):
     assert popen.blocked.wait(2)
     sup.stop(timeout=2)
     assert os.path.basename(popen.calls[0][0][popen.calls[0][0].index("-Z") + 1]) == "tcpdump"
+
+
+def test_low_disk_space_pauses_tcpdump_until_space_recovers(tmp_path, monkeypatch):
+    monkeypatch.setattr("credwatch.capture.PAUSED_POLL_SECONDS", 0.01)
+    space = {"free": 2048}
+    vfs = lambda path: _vfs(free_mb=space["free"], total_mb=10240)(path)  # noqa: E731
+    popen = FakePopen(fail_times=0)
+    failures = []
+    sup = _sup(tmp_path, popen, failures, statvfs=vfs)
+    assert sup.check_disk_space() is None
+    sup.start()
+    assert popen.blocked.wait(2)
+    assert _wait(lambda: sup.status().running)
+    space["free"] = 100
+    problem = sup.check_disk_space()
+    assert problem is not None and "packet capture paused" in problem
+    assert _wait(lambda: not sup.status().running)
+    assert popen.procs[0].terminated
+    assert sup.status().paused
+    spawned = len(popen.calls)
+    threading.Event().wait(0.1)
+    assert len(popen.calls) == spawned  # stays stopped while space is low
+    space["free"] = 4096
+    assert sup.check_disk_space() is None
+    assert _wait(lambda: len(popen.calls) == spawned + 1)
+    assert _wait(lambda: sup.status().running)
+    assert not sup.status().paused
+    sup.stop(timeout=2)
+    assert failures == []  # a pause is a health problem, not a tcpdump failure
+
+
+def test_low_disk_space_at_start_never_spawns(tmp_path, monkeypatch):
+    monkeypatch.setattr("credwatch.capture.PAUSED_POLL_SECONDS", 0.01)
+    popen = FakePopen(fail_times=0)
+    sup = _sup(tmp_path, popen, statvfs=_vfs(free_mb=10, total_mb=10240))
+    sup.start()
+    assert _wait(lambda: sup.status().paused)
+    threading.Event().wait(0.05)
+    assert popen.calls == []
+    sup.stop(timeout=2)
+
+
+def test_supervisor_prunes_by_total_size(tmp_path):
+    _sized(tmp_path, [2 * MIB, 2 * MIB, 1 * MIB])
+    popen = FakePopen(fail_times=0)
+    sup = CaptureSupervisor(
+        _cfg(keep=100, max_total_mb=3), tmp_path, popen=popen, on_failure=lambda _: None,
+        sleep=lambda s: None, clock=lambda: 0.0, statvfs=_vfs(free_mb=9999, total_mb=99999),
+    )
+    sup.start()
+    assert popen.blocked.wait(2)
+    sup.stop(timeout=2)
+    assert len(list(tmp_path.glob("credwatch-*.pcap"))) == 2

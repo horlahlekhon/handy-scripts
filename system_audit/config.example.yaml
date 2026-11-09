@@ -17,7 +17,10 @@ capture:
   interface: any          # macOS default: pktap,all
   rotate_seconds: 3600
   retain_files: 168
-  snaplen: 0
+  max_total_mb: 2048      # all pcaps together; oldest pruned first, newest never
+  min_free_percent: 5     # tcpdump paused (health alert) while the data_dir filesystem
+  min_free_mb: 1024       #   has less free than either floor; resumes when space recovers
+  snaplen: 0              # 0 = full packets; 256 keeps headers, DNS and TLS SNI at far less risk
   drop_privileges_to: tcpdump   # tcpdump -Z user; macOS has no standard capture user, use root
 
 email:

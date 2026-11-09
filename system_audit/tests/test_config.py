@@ -74,6 +74,22 @@ def test_yaml_allowlist_and_extra_paths(tmp_path, target, home):
     assert len(cfg.allowlist) == 2
 
 
+def test_capture_disk_bounds_default_and_override(tmp_path, target):
+    cfg = load_config(_write(tmp_path, {}), "linux", target)
+    assert (cfg.capture.max_total_mb, cfg.capture.min_free_percent, cfg.capture.min_free_mb) == (
+        2048, 5, 1024,
+    )
+    assert cfg.capture.snaplen == 0
+    cfg = load_config(
+        _write(tmp_path, {"capture": {"max_total_mb": 512, "min_free_percent": 10,
+                                      "min_free_mb": 0}}),
+        "linux", target,
+    )
+    assert (cfg.capture.max_total_mb, cfg.capture.min_free_percent, cfg.capture.min_free_mb) == (
+        512, 10, 0,
+    )
+
+
 def test_default_config_dict_does_not_leak_mutation():
     d = default_config_dict("linux")
     d["capture"]["retain_files"] = 1
@@ -113,6 +129,11 @@ def test_error_does_not_echo_secret_value(tmp_path, target):
         ({"capture": {"drop_privileges_to": ""}}, "capture.drop_privileges_to"),
         ({"capture": {"drop_privileges_to": "a b"}}, "capture.drop_privileges_to"),
         ({"capture": {"drop_privileges_to": 3}}, "capture.drop_privileges_to"),
+        ({"capture": {"max_total_mb": 0}}, "capture.max_total_mb"),
+        ({"capture": {"max_total_mb": "2G"}}, "capture.max_total_mb"),
+        ({"capture": {"min_free_percent": 100}}, "capture.min_free_percent"),
+        ({"capture": {"min_free_percent": -1}}, "capture.min_free_percent"),
+        ({"capture": {"min_free_mb": -1}}, "capture.min_free_mb"),
     ],
 )
 def test_invalid_values_name_the_field(tmp_path, target, data, field):

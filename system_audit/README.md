@@ -185,7 +185,10 @@ no-follow checks and refuse symlinked or user-writable ancestors. On macOS do no
 | `capture.interface` | `any` (Linux), `pktap,all` (macOS) | passed to `tcpdump -i` |
 | `capture.rotate_seconds` | `3600` | pcap rotation period, `>= 1` |
 | `capture.retain_files` | `168` | rotated pcaps kept (a week at hourly rotation), `>= 1` |
-| `capture.snaplen` | `0` | `0` = full packets |
+| `capture.max_total_mb` | `2048` | cap on all pcaps together, `>= 1`; the oldest are pruned first (checked every minute), the file tcpdump is writing is never deleted |
+| `capture.min_free_percent` | `5` | `0`-`50`; with `min_free_mb`, the free-space floor for the filesystem holding `data_dir` |
+| `capture.min_free_mb` | `1024` | `>= 0`; below either floor `tcpdump` is stopped and a health alert names the shortfall; capture resumes when space recovers |
+| `capture.snaplen` | `0` | bytes kept per packet; `0` = full packets (see below) |
 | `capture.drop_privileges_to` | `tcpdump` (Linux), `root` (macOS) | user for `tcpdump -Z`; macOS has no standard capture user, so tcpdump stays root there |
 | `email.smtp_host` | `smtp.gmail.com` | |
 | `email.smtp_port` | `587` | `1`-`65535` |
@@ -219,6 +222,17 @@ allowlist:
 ```
 
 Because `allowlist` replaces the defaults, repeat any other rules you still want.
+
+**Capture disk use.** A full root filesystem makes auditd suspend logging (its default
+`disk_full_action`) and breaks event writes, so capture is bounded three ways: by file
+count (`retain_files`), by total size (`max_total_mb`), and by a free-space floor
+(`min_free_percent` / `min_free_mb`) that stops `tcpdump` until space recovers. The
+current file is never pruned, so a single hour of heavy traffic can exceed
+`max_total_mb` until it rotates; the free-space floor is the backstop. `snaplen: 0`
+keeps full packets: the most evidence (payloads of plaintext exfiltration), but also the
+most disk and the most sensitive pcaps. `snaplen: 256` keeps link/IP/TCP headers, DNS
+and the TLS ClientHello SNI, which is what triage usually needs, at a fraction of the
+size; it is the lower-risk choice if disk or pcap sensitivity worries you.
 
 **Watched paths** are the fixed credential files (`~/.aws/credentials`, `~/.aws/config`,
 `~/.ssh`, `~/.config/gh/hosts.yml`, gcloud, docker, kube, npm, pypi, netrc, gnupg, 1Password

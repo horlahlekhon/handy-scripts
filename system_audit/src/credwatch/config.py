@@ -43,6 +43,9 @@ class CaptureConfig:
     retain_files: int
     snaplen: int
     drop_privileges_to: str
+    max_total_mb: int = 2048  # all pcaps together; oldest pruned first (newest kept)
+    min_free_percent: int = 5  # data_dir filesystem floor: tcpdump paused below either
+    min_free_mb: int = 1024
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,9 @@ def default_config_dict(os_name: str) -> dict[str, Any]:
             "rotate_seconds": 3600,
             "retain_files": 168,
             "snaplen": 0,
+            "max_total_mb": 2048,
+            "min_free_percent": 5,
+            "min_free_mb": 1024,
             # macOS has no standard unprivileged capture user, so it keeps root.
             "drop_privileges_to": "tcpdump" if os_name == "linux" else "root",
         },
@@ -269,6 +275,28 @@ _TOP_KEYS = {
 }
 
 
+_CAPTURE_KEYS = {
+    "enabled", "interface", "rotate_seconds", "retain_files", "snaplen", "drop_privileges_to",
+    "max_total_mb", "min_free_percent", "min_free_mb",
+}
+MAX_MIN_FREE_PERCENT = 50
+
+
+def _build_capture(merged: Mapping[str, Any]) -> CaptureConfig:
+    cap = _section(merged, "capture", _CAPTURE_KEYS)
+    return CaptureConfig(
+        enabled=_bool(cap, "capture", "enabled"),
+        interface=_str(cap, "capture", "interface"),
+        rotate_seconds=_int(cap, "capture", "rotate_seconds", 1),
+        retain_files=_int(cap, "capture", "retain_files", 1),
+        snaplen=_int(cap, "capture", "snaplen", 0),
+        drop_privileges_to=_user_name(cap, "capture", "drop_privileges_to"),
+        max_total_mb=_int(cap, "capture", "max_total_mb", 1),
+        min_free_percent=_int(cap, "capture", "min_free_percent", 0, MAX_MIN_FREE_PERCENT),
+        min_free_mb=_int(cap, "capture", "min_free_mb", 0),
+    )
+
+
 def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
     merged = _deep_merge(default_config_dict(os_name), _read_yaml(path))
     for key in merged:
@@ -290,17 +318,7 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
         excludes=_str_list(env["excludes"], "env_scan.excludes"),
     )
 
-    cap = _section(
-        merged, "capture", {"enabled", "interface", "rotate_seconds", "retain_files", "snaplen", "drop_privileges_to"}
-    )
-    capture = CaptureConfig(
-        enabled=_bool(cap, "capture", "enabled"),
-        interface=_str(cap, "capture", "interface"),
-        rotate_seconds=_int(cap, "capture", "rotate_seconds", 1),
-        retain_files=_int(cap, "capture", "retain_files", 1),
-        snaplen=_int(cap, "capture", "snaplen", 0),
-        drop_privileges_to=_user_name(cap, "capture", "drop_privileges_to"),
-    )
+    capture = _build_capture(merged)
 
     em = _section(
         merged,
