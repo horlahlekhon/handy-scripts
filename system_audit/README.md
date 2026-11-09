@@ -152,7 +152,7 @@ sudoedit /private/etc/credwatch/secrets.env
 it, hence the `/opt/pipx` form. The installer writes
 `/Library/LaunchDaemons/com.credwatch.daemon.plist` (`RunAtLoad`, `KeepAlive`); launchd
 has no `EnvironmentFile`, so the plist passes `--secrets-file /etc/credwatch/secrets.env`
-instead. Grant **Full Disk Access** to the credwatch executable and `/usr/bin/fs_usage`.
+instead, plus `--user <target>`. Grant **Full Disk Access** to the credwatch executable and `/usr/bin/fs_usage`.
 Walk through [docs/macos-verification.md](docs/macos-verification.md) before relying on it.
 
 ## Configuration
@@ -377,7 +377,10 @@ Stated plainly: the macOS backend is a stop-gap and much weaker than Linux.
   `darwin_trust_name_resolution: true` accepts name-only resolution and quiets the
   alerts, but an attacker who can choose a process name can then get allowed.
 - **Matching is lexical.** Relative-path opens, symlink aliases and hard links that read
-  a watched file under another name are not detected, and there is no inode check.
+  a watched file under another name are not detected, and there is no inode check. The
+  allowlist judges the reported path, not its `realpath` (stored for reports only): a
+  symlink in `~/.ssh` pointing into `~/.gnupg` is judged by the `~/.ssh/**` rule. The
+  default (untrusted name resolution) flags such reads anyway.
   fs_usage cannot close this gap. The future backend should be **`eslogger`** (macOS 13+,
   Endpoint Security): real pid, audit token, executable and resolved paths. EndpointSecurity
   proper needs a signed, entitled binary, which is out of scope here.
@@ -386,7 +389,9 @@ Stated plainly: the macOS backend is a stop-gap and much weaker than Linux.
   `fs_usage` further.
 - `tcpdump` stays root (no standard capture user), and the interface default is
   `pktap,all`.
-- No health signal from the backend itself; rely on the heartbeat and `status --probe`.
+- Backend health is visible only inside the daemon: it raises `fs_usage exited (rc=N)`
+  and `no fs_usage output for 60 s` as health alerts. The `status` command cannot see
+  `fs_usage` directly and relies on the heartbeat and `status --probe`.
 
 Details and the full list of known gaps: [docs/macos-verification.md](docs/macos-verification.md)
 ("Known gaps" and "Known macOS limitations").

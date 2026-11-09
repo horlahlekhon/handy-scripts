@@ -237,8 +237,8 @@ sudo credwatch report --last 1d --flagged --format table
 
 Look for flagged rows from legitimate processes (for example GNOME daemons touching
 `~/.ssh` or `~/.gnupg`: `gnome-keyring-daemon`, `gvfsd-*`, `gcr-ssh-agent`). Record them
-and add entries to `allowlist` in `/etc/credwatch/config.yaml`, using the process name
-(`comm`) and a path glob:
+and add entries to `allowlist` in `/etc/credwatch/config.yaml`, using the executable's
+basename (or an absolute executable path) and a path glob. `comm` is never matched:
 
 ```yaml
 allowlist:
@@ -247,7 +247,8 @@ allowlist:
 ```
 
 Note that a user-supplied `allowlist` replaces the default list of the same key, so
-copy the defaults you still want from `config.example.yaml`. Then
+copy the defaults you still want from the "Default allowlist" table in the README
+(`config.example.yaml` has only a commented sample). Then
 `sudo systemctl restart credwatch`. Only allow processes whose executable lives in a
 trusted directory (`allowlist_trusted_dirs`). Send any entries that should be shipped as
 defaults back to the repo as a change to `default_config_dict` in `config.py`.

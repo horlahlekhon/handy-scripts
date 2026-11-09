@@ -30,14 +30,14 @@ The e2e test skips itself if real credwatch audit rules are loaded (key stays `c
 | `cli` | argparse: `run`, `status [--probe]`, `report`, `test-email`, `install`. `--config/--user/--secrets-file` accepted before and after the subcommand. |
 | `config` | Frozen config dataclasses, OS-aware defaults, YAML load + strict validation (unknown keys and credential keys rejected). |
 | `platform_info` | OS detection, target-user resolution, `/etc/credwatch` paths, root-owned default data dir. |
-| `paths` | Default sensitive paths, `.env*` scan, `WatchMatcher`, watch-list file I/O. |
+| `paths` | Default sensitive paths, `.env*` scan (never descends into watched dirs), `WatchMatcher`, watch-list file I/O. |
 | `models` | Frozen `FileAccessEvent`, `NetworkSnapshot`, `Verdict`, `ProcessedEvent`. |
 | `allowlist` | Path glob -> process patterns with trusted-dir / root-owned-chain checks. |
 | `correlate` | Canonicalise path (inode/dev verified), allowlist verdict, psutil network snapshot + ancestry. |
 | `backends/` | `base` ABC; `linux_audit` (rules render/install, parser, `LinuxAuditBackend`, health rule count, native export); `macos_fsusage` (fs_usage parser, pid resolution, `MacFsUsageBackend`). |
 | `store` | SQLite events, snapshots, rollups, meta, query helpers; hardened open. |
 | `safe_fs` | `open_dir_chain`: no-follow, ownership-checked directory walk. |
-| `capture` | tcpdump supervisor with rotation, capped retention, drop-privileges. |
+| `capture` | tcpdump supervisor: rotation, retention by count and total size (`max_total_mb`), free-space floor that pauses tcpdump, drop-privileges. |
 | `retention` | `prune_old_files`. |
 | `tail` | Rotation-aware file follower. |
 | `alert` | Credentials loading, `Mailer`, `AlertCoalescer`, retrying `AlertDispatcher`. |
@@ -62,4 +62,6 @@ Flow: backend event -> correlate (canonical path, allowlist) -> store -> (flagge
 - **`install` is idempotent**: files rewritten only when content differs, loaded rule count verified and repaired, service restarted.
 - **Immutability.** Value types are `@dataclass(frozen=True)` with tuples for collections.
 - **Python >=3.11**; runtime deps only `psutil` and `PyYAML`.
-- tcpdump drops to `capture.drop_privileges_to` (`tcpdump` on Linux, `root` on macOS).
+- tcpdump drops to `capture.drop_privileges_to` (`tcpdump` on Linux, `root` on macOS). Capture never deletes the file being written and is paused (health problem) while the data_dir filesystem is below `min_free_percent`/`min_free_mb`.
+- **The service always names its target user.** `install` validates the target login name and renders `run ... --user <name>` into the unit/plist; `run`/`install` refuse an implicit root target (no `--user`, fallback resolves to uid 0).
+- **fs_usage matching is canonical caseless** (`paths.canonical_caseless`, NFD(casefold(NFD))) at every site; `/..` and non-ASCII lines also merge the component fallback and strict target, and any addition fails closed (UNKNOWN_PROC).

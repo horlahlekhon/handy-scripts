@@ -6,7 +6,7 @@ fakes. Each step below is for a human on a Mac. Record what actually happens, an
 the code or this file where reality differs.
 
 **What has been verified, and how.** Every parser and pipeline claim in this file is
-covered by unit tests on Linux (`tests/test_macos_fsusage.py`) against the hand-written
+covered by unit tests on Linux (`tests/test_macos_fsusage_*.py`) against the hand-written
 fixture and synthetic lines. The daemon-path claims (prefilter → parser → events →
 export) are tested by feeding lines through `MacFsUsageBackend.events()` with a fake
 `Popen`, including a randomized test of attacker-chosen process names and path
@@ -23,15 +23,16 @@ The fs_usage backend is a stop-gap and much weaker than the Linux auditd backend
   matches a watched path after lexical normalisation: `./` and `x/..` segments and
   repeated slashes are removed (`os.path.normpath`, plus a leading `//`), the text is
   Unicode-normalised to NFC (APFS treats NFC and NFD spellings as one name), and case is
-  ignored. Nothing is resolved on disk at this stage. A `..` that cannot be resolved
-  lexically (see "Unparseable lines fail closed") is reported against the watched path
-  by component name, flagged.
+  ignored by Unicode canonical caseless matching (`NFD(casefold(NFD(...)))`). Nothing is
+  resolved on disk at this stage. A line with a `/..` segment or non-ASCII text also gets
+  the component-name fallback (see "Unparseable lines fail closed"), flagged.
 - **Aliases are not detected.** Relative-path opens (`cd ~/.aws && cat credentials`, if
   fs_usage prints the relative name), symlink aliases (`ln -s ~/.aws/credentials /tmp/x`)
   and hard links (`ln ~/.aws/credentials /tmp/x; cat /tmp/x`) all read the secret under a
   path credwatch does not watch.
 - **No inode verification.** fs_usage reports no inode/dev, so the correlator cannot
-  confirm which file was actually opened.
+  confirm which file was actually opened, and the allowlist judges the lexical path (see
+  "No inode/dev" below).
 - **Process identity is weak.** See "Process attribution" below.
 
 The recommended future backend is **eslogger** (macOS 13+, Endpoint Security). It reports
@@ -50,7 +51,7 @@ grep -E 'aws/credentials|credwatch/canary' /tmp/fs.txt | head
 Trim `/tmp/fs.txt` to about 50 lines around those accesses, keeping some `read`/`close`
 lines on `F=` and some unrelated paths. Anonymise the user name. Replace
 `tests/fixtures/fs_usage_sample.txt` with it, keep the `#` header (update it to "captured
-on macOS <version>, <date>"), and run `pytest tests/test_macos_fsusage.py`. Fix the
+on macOS <version>, <date>"), and run `pytest tests/test_macos_fsusage_*.py`. Fix the
 parser where the real format differs from these assumptions:
 
 - columns: `HH:MM:SS.ffffff  op  F=fd|[errno]  (mode)  /path  elapsed  [W]  name.NNNN`;
@@ -194,38 +195,62 @@ With `darwin_trust_name_resolution: true`, also prove an allowed access is recor
     processes whose names are canonically equivalent (`café` in NFC and in NFD) are both
     candidates, so the lookup is ambiguous rather than a false unique match.
 - **Prefilter.** fs_usage output is high-volume, so the daemon first drops every line
-  that does not contain, after NFC and case-folding, the final component of some watched
-  path (`.netrc`, `credentials`, `.ssh`, ...; for a watched directory its own name). Any
-  spelling the parser below accepts (`./`, `//`, `x/..`, case, NFD) still contains that
-  component, and the `..` fallback below keys on exactly those components, so the
-  prefilter never drops a line the parser would report (tested by pushing randomized
+  that does not contain, in canonical caseless form `NFD(casefold(NFD(...)))`, the final
+  component of some watched path (`.netrc`, `credentials`, `.ssh`, ...; for a watched
+  directory its own name). Any spelling the parser below accepts (`./`, `//`, `x/..`,
+  case, NFC/NFD, every case and composition spelling of Greek `ΐ`/`ΰ`) still contains
+  that component, and the component fallback below keys on exactly those components, so
+  the prefilter never drops a line the parser would report (tested by pushing randomized
   lines through the daemon's stream). Common names such as `config` let many unrelated
   lines through to the full parse; that costs CPU, not correctness (see "Backpressure").
 - **Unparseable lines fail closed.** For a relevant op (open, rename, unlink, ...),
   credwatch NFC-normalises the line and searches it twice: for every `/`-starting path (at
   the start, after whitespace, or after `]`), normalised (`./`, `//`, `x/..`) and
-  case-folded, and for every watched path as a substring. The substring search compares
-  one form on both sides, `casefold(NFC(...))`, with an offset map back to the line, so
-  non-ASCII names cannot misalign it and characters such as `ǰ` (which casefold to a
-  decomposed sequence) are found. Any watched path found produces an event. If neither
-  search finds one but the line has a `/..` segment (for example `/Users/alice/x  y/../.netrc`,
-  where whitespace inside the component that `..` removes breaks both searches), every
-  watched path whose final component occurs in the line is reported **as the watched path
-  itself**, flagged, with the miss reason `unresolvable '..' path; attributed to watched
-  path by component name`. Otherwise the line is ignored. The process name and tid are
-  trusted only when the strict column parse yields exactly that watched path and the
-  original (un-normalised) line gives the same name.tid; otherwise the event is "process
-  unknown" and flagged, and a rate-limited WARNING `fs_usage parse miss` is logged. The
-  process name is kept as printed (not NFC'd). Limits:
+  compared in canonical caseless form, and for every watched path as a substring. Every
+  comparison (watch matcher, prefilter, substring search) uses one form,
+  `NFD(casefold(NFD(...)))` (Unicode canonical caseless matching); the substring search
+  builds it character by character with an offset map back to the line, so names that
+  change length when folded (`ß`, `ǰ`, `ΐ`) cannot misalign it. Any watched path found
+  produces an event. Then, if the line has a `/..` segment or any non-ASCII character,
+  two more sources are merged in, deduplicated:
+  - **component fallback:** every watched path whose final component occurs in the line
+    *outside* the spans the exact searches matched, and that no already reported path
+    lies at or below, is reported **as the watched path itself**. This catches
+    `/Users/alice/x  y/../.netrc` (whitespace inside a component that `..` removes breaks
+    both searches), a decoy in front of the target
+    (`~/.aws/config  x/../../.ssh/id_rsa`, `~/.netrc x  y/../.ssh/id`, a rename whose
+    destination hides behind `x  y/..`), and non-ASCII lines whose combining marks the
+    per-character fold orders differently from the whole-string form;
+  - **strict target:** when exact matches exist, the strict column parse's path (which
+    resolves `..` itself), if it is watched and lies in a different watched root than
+    every exact match (`~/.ssh/id_rsa` in the decoy example).
+
+  If either source adds a path, every event from the line is "process unknown" and
+  flagged, with the miss reason `unresolvable '..' path; attributed to watched path by
+  component name` (or the non-ASCII variant). With nothing found the line is ignored.
+  Otherwise the process name and tid are trusted only when the strict column parse
+  yields exactly the single watched path found, at the same place, and the original
+  (un-normalised) line gives the same name.tid; otherwise the event is "process unknown"
+  and flagged, and a rate-limited WARNING `fs_usage parse miss` is logged. The process
+  name is kept as printed (not NFC'd). Limits:
   - a path printed in a form neither search recognises (relative, or glued to a preceding
-    path character) is missed, unless the line also has a `/..` segment and so takes the
-    fallback. See "Known gaps";
-  - the `..` fallback is by component name, so it over-reports: `/opt/x/../config`
-    gives flagged events for every watched path named `config`, and the reported path is
-    the watched path (for a watched directory, the directory), not the file opened;
-  - if the whitespace component sits *below* a watched directory
-    (`~/.ssh/x  y/../id`), the first search already finds `~/.ssh/x`; that flagged event
-    names the right watched directory but the wrong file, and the fallback does not run;
+    path character) is missed, unless the line also has a `/..` segment or non-ASCII text
+    and its final component occurs outside the matched spans. See "Known gaps";
+  - the component fallback is by name, so it over-reports: `/opt/x/../config` gives
+    flagged events for every watched path named `config`, and the reported path is the
+    watched path (for a watched directory, the directory), not the file opened; any
+    non-ASCII line naming e.g. `.netrc` outside a matched path is flagged too;
+  - **wrong file, right root:** if the whitespace component sits *below* a watched
+    directory (`~/.ssh/x  y/../id`), the exact search finds `~/.ssh/x`. The fallback and
+    strict target add nothing (both are in `~/.ssh`), so the flagged event names the right
+    watched directory but the wrong file;
+  - **wrong root only if the component hides inside a match:** a target in another watched
+    root is reported unless its final component occurs only inside a span the exact
+    searches already matched (for example a path that walks *through* another watched
+    path with `..`). The decoy is then still reported, flagged, so the line is never
+    allowed, but the event can name only the decoy;
+  - the strict target is the column parse's guess: with a hostile process name it can
+    be a wrong file in the right root. It only ever adds flagged events;
   - a path under a watched directory that holds two consecutive spaces is reported only
     up to the double space;
   - **single-space ambiguity.** The cross-check extends a path across single spaces
@@ -239,11 +264,17 @@ With `darwin_trust_name_resolution: true`, also prove an allowed access is recor
     (not directories) are not affected. The step-1 spacing check decides whether this
     matters in practice. `test_single_space_before_elapsed_is_ambiguous_under_watched_dir`
     pins the behaviour.
-- **No inode/dev.** fs_usage reports no inode, so the correlator verifies by lexical path
-  (canonicalised with `realpath`) only, which is weaker than the Linux inode check.
+- **No inode/dev; the allowlist judges the lexical path.** fs_usage reports no inode, so
+  there is nothing to verify a canonical path against. The correlator stores the
+  `realpath` result as `canonical_path` for the report, but the allowlist verdict uses
+  the reported (lexical) path. A symlink `~/.ssh/x -> ~/.gnupg/secring` read by `git` is
+  judged against the `~/.ssh/**` rule. With the default untrusted name resolution such
+  events are flagged anyway (unknown exe); with `darwin_trust_name_resolution: true` this
+  is a real gap. Linux verifies inode/dev and judges the canonical path.
 - **Case-insensitive matching.** APFS is case-insensitive by default, so watched paths
   match case-insensitively. The reported path keeps the caller's case but is lexically
-  normalised (`./`, `//`, `x/..` removed) and in NFC form; the event's `raw` and the
+  normalised (`./`, `//`, `x/..` removed) and in NFC form; comparisons use the canonical
+  caseless form; the event's `raw` and the
   export keep the line exactly as fs_usage printed it. An access via
   `~/.AWS/Credentials` is caught but does not match the lower-case allowlist patterns, so
   it is flagged.
