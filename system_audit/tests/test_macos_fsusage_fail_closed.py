@@ -144,3 +144,21 @@ def test_watch_matcher_folds_with_nfd_casefold_nfd():
     m = WatchMatcher([Path(f"/Users/{_IOTA}/.netrc")], case_insensitive=True)
     nfd = unicodedata.normalize
     assert m.normalize("/Users/Ϊ́/.NETRC") == nfd("NFD", nfd("NFD", f"/Users/{_IOTA}/.netrc").casefold())
+
+
+def test_non_ascii_reordered_target_beside_found_decoy_is_reported():
+    """The fallback must not be skipped just because an ASCII decoy was found."""
+    target = f"/Users/{_IOTA}̨na/.ssh"
+    m = WatchMatcher([Path(target), Path(f"{ALICE}/.netrc")], case_insensitive=True)
+    line = (f"23:59:58.100000  rename  {ALICE}/.netrc  "
+            f"(R_____)/USERS/{_IOTA}̨NA/.SSH/id{_TAIL_OK}")
+    hits, miss = _hits(line, m)
+    assert {f"{ALICE}/.netrc", target} <= {h.path for h in hits}
+    assert _flagged(hits) and miss is not None
+
+
+def test_non_ascii_line_with_exact_hit_is_still_attributed(matcher):
+    line = f"{OPEN}/Users/josé/.netrc{_TAIL_OK}"
+    hits, miss = _hits(line, matcher)
+    assert [(h.path, h.proc_name) for h in hits] == [("/Users/josé/.netrc", "cat")]
+    assert miss is None

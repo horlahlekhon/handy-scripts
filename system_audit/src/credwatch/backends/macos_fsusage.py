@@ -315,8 +315,8 @@ def _component_outside(path: str, rest: str, spans: Spans, matcher: WatchMatcher
     return False
 
 
-def _dotdot_extra(rest: str, found: Found, spans: Spans, matcher: WatchMatcher) -> Found:
-    """I3: watched paths a `/..` may hide behind the paths the exact searches found.
+def _hidden_extra(rest: str, found: Found, spans: Spans, matcher: WatchMatcher) -> Found:
+    """Watched paths a `/..` (I3) or canonical reordering may hide from the exact searches.
 
     - the strict parse's target (it resolves `..` itself), when found paths exist
       and it lies in a different watched root than all of them;
@@ -362,20 +362,18 @@ def _attribution(
 def _found_paths(rest: str, matcher: WatchMatcher) -> tuple[Found, str | None]:
     """(watched paths, reason they cannot be attributed or None).
 
-    Exact searches first. A `/..` always adds the strict target and the
-    component fallback (I3); a non-ASCII line the exact searches missed gets
-    the component fallback (canonical reordering can blind the offset map).
+    Exact searches first. A `/..` (I3) or non-ASCII text (canonical
+    reordering can blind the per-character offset map) adds the strict
+    target and the component fallback; any addition fails closed.
     """
     found, spans = _loose_spans(rest, matcher)
-    if _DOTDOT.search(rest) is not None:
-        extra = _dotdot_extra(rest, found, spans, matcher)
-        if extra:
-            return (*found, *extra), DOTDOT_MISS
+    dotdot = _DOTDOT.search(rest) is not None
+    if not dotdot and rest.isascii():
         return found, None
-    if not found and not rest.isascii():
-        fallback = _component_fallback(rest, matcher)
-        return fallback, NON_ASCII_MISS if fallback else None
-    return found, None
+    extra = _hidden_extra(rest, found, spans, matcher)
+    if not extra:
+        return found, None
+    return (*found, *extra), DOTDOT_MISS if dotdot else NON_ASCII_MISS
 
 
 def parse_fs_usage_hits(
