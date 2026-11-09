@@ -179,7 +179,7 @@ no-follow checks and refuse symlinked or user-writable ancestors. On macOS do no
 | `env_scan.roots` | `["~"]` | where to look for `.env*` files |
 | `env_scan.max_depth` | `4` | integer, `>= 0` |
 | `env_scan.excludes` | `[node_modules, .git, venv, .venv]` | directory names skipped |
-| `allowlist` | built-in list below | list of `{path_pattern, processes}`; setting it **replaces** the defaults (the canary rule is always appended) |
+| `allowlist` | built-in list below | list of `{path_pattern, processes}`; setting it **replaces** the defaults (the canary needs no rule: it is exempted by file identity) |
 | `allowlist_trusted_dirs` | Linux: `/usr/bin /usr/sbin /usr/libexec /usr/lib /bin /sbin /usr/local/bin /opt/pipx /snap/bin`; macOS: `/usr/bin /usr/sbin /usr/libexec /bin /sbin /System /opt/pipx` | dirs where a basename allowlist match is honoured (also needs the root-owned chain check) |
 | `capture.enabled` | `true` | run `tcpdump` |
 | `capture.interface` | `any` (Linux), `pktap,all` (macOS) | passed to `tcpdump -i` |

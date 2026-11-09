@@ -51,10 +51,12 @@ def test_missing_file_uses_defaults(tmp_path, target):
     "os_name,suffix",
     [("linux", "/var/lib/credwatch"), ("darwin", "/Library/Application Support/credwatch")],
 )
-def test_canary_rule_always_appended(tmp_path, target, home, os_name, suffix):
-    cfg = load_config(_write(tmp_path, {"allowlist": []}), os_name, target)
-    assert cfg.allowlist[-1] == AllowRule(str(Path(suffix) / "canary"), ("credwatch",))
-    assert cfg.allowlist[-1].processes == ("credwatch",)
+def test_no_canary_allowlist_rule(tmp_path, target, home, os_name, suffix):
+    """The canary is exempted by file identity in correlate (R51/R52), never by a path rule."""
+    assert load_config(_write(tmp_path, {"allowlist": []}), os_name, target).allowlist == ()
+    defaults = load_config(_write(tmp_path, {}), os_name, target).allowlist
+    assert not any(r.path_pattern.endswith("/canary") for r in defaults)
+    assert not any("credwatch" in r.processes for r in defaults)
 
 
 def test_yaml_overrides_merge_deeply(tmp_path, target):
@@ -71,7 +73,7 @@ def test_yaml_allowlist_and_extra_paths(tmp_path, target, home):
     cfg = load_config(_write(tmp_path, data), "linux", target)
     assert cfg.extra_paths == (home / "secrets.txt",)
     assert cfg.allowlist[0] == AllowRule(str(home / "x/**"), ("foo",))
-    assert len(cfg.allowlist) == 2
+    assert len(cfg.allowlist) == 1
 
 
 def test_capture_disk_bounds_default_and_override(tmp_path, target):

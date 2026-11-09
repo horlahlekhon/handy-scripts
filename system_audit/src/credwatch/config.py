@@ -15,7 +15,6 @@ from credwatch.platform_info import TargetUser, default_data_dir
 logger = logging.getLogger(__name__)
 
 CREDENTIAL_KEYS = frozenset({"password", "smtp_password", "smtp_user", "user", "username", "secret", "token"})
-CANARY_PROCESSES = ("credwatch",)
 
 
 class ConfigError(ValueError):
@@ -224,7 +223,7 @@ def _str_list(value: Any, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _build_allowlist(raw: Any, home: Path, data_dir: Path) -> tuple[AllowRule, ...]:
+def _build_allowlist(raw: Any, home: Path) -> tuple[AllowRule, ...]:
     if not isinstance(raw, list):
         raise ConfigError("allowlist: must be a list")
     rules: list[AllowRule] = []
@@ -244,7 +243,6 @@ def _build_allowlist(raw: Any, home: Path, data_dir: Path) -> tuple[AllowRule, .
         if not procs:
             raise ConfigError(f"{field}.processes: must not be empty")
         rules.append(AllowRule(_expand(pattern, home), procs))
-    rules.append(AllowRule(str(data_dir / "canary"), CANARY_PROCESSES))
     return tuple(rules)
 
 
@@ -352,7 +350,7 @@ def load_config(path: Path, os_name: str, target: TargetUser) -> Config:
         data_dir=data_dir,
         extra_paths=tuple(Path(_expand(p, home)) for p in extra),
         env_scan=env_scan,
-        allowlist=_build_allowlist(merged["allowlist"], home, data_dir),
+        allowlist=_build_allowlist(merged["allowlist"], home),
         allowlist_trusted_dirs=tuple(
             Path(_expand(d, home))
             for d in _str_list(merged["allowlist_trusted_dirs"], "allowlist_trusted_dirs")

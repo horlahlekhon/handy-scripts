@@ -36,7 +36,7 @@ audit_export:
   interval_minutes: 60
   retention_days: 30
 
-# Setting `allowlist` REPLACES the built-in defaults (the canary rule is always added).
+# Setting `allowlist` REPLACES the built-in defaults (the canary needs no rule here).
 # allowlist:
 #   - path_pattern: "~/.ssh/**"
 #     processes: [ssh, git, scp, sftp, rsync]
