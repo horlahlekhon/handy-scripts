@@ -1,0 +1,81 @@
+#!/bin/bash
+# Entry-point bashrc. Hook it up with dot-files/install.sh, which adds
+#   source "/path/to/handy-scripts/dot-files/bashrc"
+# to ~/.bashrc. Everything else is loaded relative to this file.
+
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+_DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export HANDY_SCRIPTS="$(cd "$_DOTFILES_DIR/.." && pwd)"
+
+# ── History ────────────────────────────────────────────────────────────────────
+HISTCONTROL=ignoreboth
+HISTSIZE=5000
+HISTFILESIZE=10000
+shopt -s histappend
+shopt -s checkwinsize
+
+# ── Prompt ─────────────────────────────────────────────────────────────────────
+case "$TERM" in
+    xterm-color|*-256color) _color_prompt=yes;;
+esac
+
+if [ "$_color_prompt" = yes ]; then
+    PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+fi
+unset _color_prompt
+
+case "$TERM" in
+    xterm*|rxvt*) PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1" ;;
+esac
+
+# ── Color support ──────────────────────────────────────────────────────────────
+if [ -x /usr/bin/dircolors ]; then
+    if [ -r ~/.dircolors ]; then
+        eval "$(dircolors -b ~/.dircolors)"
+    else
+        eval "$(dircolors -b)"
+    fi
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+fi
+
+# ── Completions (skip if ~/.bashrc already loaded them) ────────────────────────
+if [ -z "$BASH_COMPLETION_VERSINFO" ] && ! shopt -oq posix; then
+    if [ -f /usr/share/bash-completion/bash_completion ]; then
+        . /usr/share/bash-completion/bash_completion
+    elif [ -f /etc/bash_completion ]; then
+        . /etc/bash_completion
+    fi
+fi
+
+# ── PATH ───────────────────────────────────────────────────────────────────────
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$PATH:$HOME/.local/bin" ;;
+esac
+
+# ── Modules ────────────────────────────────────────────────────────────────────
+for _f in "$_DOTFILES_DIR/aliases.sh" "$_DOTFILES_DIR/functions.sh" "$_DOTFILES_DIR/ssh.sh"; do
+    [ -f "$_f" ] && source "$_f"
+done
+
+# ── Machine-local overrides (dot-files/customs/, gitignored) ──────────────────
+if [ -d "$_DOTFILES_DIR/customs" ]; then
+    for _f in "$_DOTFILES_DIR"/customs/*.sh "$_DOTFILES_DIR"/customs/.custom-*; do
+        [ -f "$_f" ] && source "$_f"
+    done
+fi
+
+# ── Git prompt (if installed) ──────────────────────────────────────────────────
+if [ -f "$HOME/.bash-git-prompt/gitprompt.sh" ]; then
+    GIT_PROMPT_ONLY_IN_REPO=1
+    source "$HOME/.bash-git-prompt/gitprompt.sh"
+fi
+
+unset _DOTFILES_DIR _f
