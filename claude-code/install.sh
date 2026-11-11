@@ -51,6 +51,14 @@ fi
 cp "$REPO_DIR/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
 ok "CLAUDE.md installed → $CLAUDE_DIR/CLAUDE.md"
 
+# ── 3b. settings.json (merged, never overwritten) ────────────────────────────
+info "Merging settings.json (credential-file deny rules)..."
+if python3 "$REPO_DIR/scripts/merge_settings.py" "$REPO_DIR/settings.json" "$CLAUDE_DIR/settings.json"; then
+  ok "settings.json merged → $CLAUDE_DIR/settings.json (previous copy: settings.json.bak)"
+else
+  fail "settings.json merge failed — $CLAUDE_DIR/settings.json left unchanged"
+fi
+
 # ── 4. MCP servers (no credentials required) ─────────────────────────────────
 info "Adding no-credential MCP servers..."
 
