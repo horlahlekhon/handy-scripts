@@ -1,2 +1,4 @@
 customs
 .vagrant
+__pycache__/
+.coverage
