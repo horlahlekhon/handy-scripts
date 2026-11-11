@@ -28,7 +28,11 @@ MAX_ANCESTRY = 5
 CANARY_RETRY_SECONDS = 60
 CANARY_PROBLEM = "canary file replaced or missing; re-run credwatch install"
 CANARY_RULE = "credwatch-canary"
+# R55: a location-only (O_PATH) open cannot read contents; recorded, never flagged.
+PATH_ONLY_RULE = "o-path (no read access)"
 _ERR_EXITED = "process exited before snapshot"
+# R54: names the syscall itself created/removed; verifiable through their parent dir.
+_PARENT_VERIFIABLE_NAMETYPES = frozenset({"CREATE", "DELETE"})
 
 
 def _endpoint(addr: Any) -> str | None:
@@ -263,6 +267,10 @@ class Correlator:
                 event, Verdict(True, CANARY_RULE), None, canonical_path=canary or None
             )
         res = self._resolve(event)
+        if event.path_only:
+            return ProcessedEvent(
+                event, Verdict(True, PATH_ONLY_RULE), None, canonical_path=res.canonical
+            )
         verdict = self._judge(res)
         snap = None if verdict.allowed else self._safe_snapshot(event.pid)
         return ProcessedEvent(event, verdict, snap, canonical_path=res.canonical)
@@ -298,11 +306,42 @@ class Correlator:
             if canonical is None:
                 raise OSError("no canonical path")
             st = self._stat(canonical)
+        except FileNotFoundError:
+            via_parent = self._resolve_via_parent(event)
+            return via_parent or unverified("stat failed")
         except OSError:
             return unverified("stat failed")
         if (st.st_ino, st.st_dev) != (event.inode, event.dev):
             return unverified("inode/dev mismatch")
         return _Resolution(replace(event, path=canonical), canonical, True)
+
+    def _resolve_via_parent(self, event: FileAccessEvent) -> _Resolution | None:
+        """Verify a vanished file through the directory it was created in or removed from.
+
+        Lock and temp files are often gone before we can stat them. When the syscall
+        itself created or deleted the name (so no symlink was followed for it) and the
+        resolved parent directory still has the audited inode/dev, the file is
+        `<resolved parent>/<name>`. Anything else returns None and stays unverified.
+        """
+        if event.nametype not in _PARENT_VERIFIABLE_NAMETYPES:
+            return None
+        if event.parent_inode is None or event.parent_dev is None:
+            return None
+        parent, name = os.path.split(event.path)
+        if name in ("", ".", ".."):
+            return None
+        canonical_parent = self._canonical(parent)
+        if canonical_parent is None:
+            return None
+        try:
+            st = self._stat(canonical_parent)
+        except OSError:
+            return None
+        if (st.st_ino, st.st_dev) != (event.parent_inode, event.parent_dev):
+            return None
+        path = os.path.join(canonical_parent, name)
+        logger.debug("path %s verified through its parent directory", path)
+        return _Resolution(replace(event, path=path), path, True)
 
     def _judge(self, res: _Resolution) -> Verdict:
         if not res.verified:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from credwatch.correlate import Correlator, snapshot_process
+from credwatch.correlate import PATH_ONLY_RULE, Correlator, snapshot_process
 from credwatch.models import FileAccessEvent, NetworkSnapshot, Verdict
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -436,3 +436,136 @@ def test_realpath_failure_with_inode_info_fails_closed():
 
     c, _ = make(StubAllowlist(), realpath_fn=bad)
     assert not c.process(ev(inode=1, dev=2)).verdict.allowed
+
+
+# --- parent-directory fallback for short-lived files (R53) ------------------------------
+
+GNUPG = "/home/u/.gnupg"
+PARENT_ID = (50, 2)
+
+
+def short_lived(path=f"{GNUPG}/pubring.kbx.lock", nametype="CREATE", parent=PARENT_ID):
+    return FileAccessEvent(
+        timestamp=NOW, path=path, pid=42, ppid=1, exe="/usr/bin/gpg", comm="gpg",
+        success=True, backend="t", raw="raw", inode=60, dev=2, nametype=nametype,
+        parent_inode=parent[0] if parent else None, parent_dev=parent[1] if parent else None,
+    )
+
+
+def stat_gone_file(dirs):
+    """stat that knows only directories; every other path no longer exists."""
+    def stat(p):
+        if p in dirs:
+            return SimpleNamespace(st_ino=dirs[p][0], st_dev=dirs[p][1])
+        raise FileNotFoundError(p)
+    return stat
+
+
+@pytest.mark.parametrize("nametype", ["CREATE", "DELETE"])
+def test_gone_file_verified_through_parent_dir(nametype):
+    a = StubAllowlist(Verdict(True, "~/.gnupg/**"))
+    c, calls = make(a, stat_fn=stat_gone_file({GNUPG: PARENT_ID}))
+    pe = c.process(short_lived(nametype=nametype))
+    assert pe.verdict == Verdict(True, "~/.gnupg/**") and calls == []
+    assert a.seen[0].path == f"{GNUPG}/pubring.kbx.lock"
+    assert pe.canonical_path == f"{GNUPG}/pubring.kbx.lock"
+
+
+def test_parent_fallback_judges_the_resolved_parent_dir():
+    """A symlinked parent is judged where it really points, not by its lexical name."""
+    a = StubAllowlist()
+    real = "/home/u/.ssh"
+    c, _ = make(a, stat_fn=stat_gone_file({real: PARENT_ID}),
+                realpath_fn=lambda p: real if p == GNUPG else p)
+    pe = c.process(short_lived())
+    assert a.seen[0].path == f"{real}/pubring.kbx.lock"
+    assert pe.canonical_path == f"{real}/pubring.kbx.lock"
+
+
+def test_gone_file_from_normal_open_stays_unverified(caplog):
+    a = StubAllowlist()
+    c, calls = make(a, stat_fn=stat_gone_file({GNUPG: PARENT_ID}))
+    with caplog.at_level(logging.INFO):
+        pe = c.process(short_lived(nametype="NORMAL"))
+    assert pe.verdict == Verdict(False, None) and a.seen == [] and len(calls) == 1
+    assert pe.canonical_path is None and "unverified path" in caplog.text
+
+
+def test_gone_file_with_foreign_parent_inode_stays_unverified():
+    a = StubAllowlist()
+    c, calls = make(a, stat_fn=stat_gone_file({GNUPG: (99, 2)}))
+    pe = c.process(short_lived())
+    assert pe.verdict == Verdict(False, None) and a.seen == [] and len(calls) == 1
+
+
+def test_gone_file_without_parent_identity_stays_unverified():
+    a = StubAllowlist()
+    c, _ = make(a, stat_fn=stat_gone_file({GNUPG: PARENT_ID}))
+    pe = c.process(short_lived(parent=None))
+    assert pe.verdict == Verdict(False, None) and a.seen == []
+
+
+def test_gone_parent_dir_stays_unverified():
+    a = StubAllowlist()
+    c, _ = make(a, stat_fn=stat_gone_file({}))
+    pe = c.process(short_lived())
+    assert pe.verdict == Verdict(False, None) and a.seen == []
+
+
+def test_existing_file_with_foreign_inode_never_uses_parent_fallback():
+    """A replaced file (inode mismatch) is suspicious; only a vanished file may fall back."""
+    a = StubAllowlist()
+    dirs = {GNUPG: PARENT_ID, f"{GNUPG}/pubring.kbx.lock": (99, 2)}
+    c, _ = make(a, stat_fn=stat_gone_file(dirs))
+    pe = c.process(short_lived())
+    assert pe.verdict == Verdict(False, None) and a.seen == []
+
+
+@pytest.mark.parametrize("path", [f"{GNUPG}/..", f"{GNUPG}/.", "/"])
+def test_parent_fallback_refuses_dot_and_root_names(path):
+    a = StubAllowlist()
+    c, _ = make(a, stat_fn=stat_gone_file({GNUPG: PARENT_ID, "/home/u": PARENT_ID,
+                                           "/": PARENT_ID}))
+    pe = c.process(short_lived(path=path))
+    assert pe.verdict == Verdict(False, None) and a.seen == []
+
+
+def test_parent_realpath_failure_stays_unverified():
+    def realpath(p):
+        if p == GNUPG:
+            raise OSError("loop")
+        return p
+
+    a = StubAllowlist()
+    c, _ = make(a, stat_fn=stat_gone_file({GNUPG: PARENT_ID}), realpath_fn=realpath)
+    pe = c.process(short_lived())
+    assert pe.verdict == Verdict(False, None) and a.seen == []
+
+
+# --- O_PATH opens: recorded, never flagged (R55) -----------------------------------------
+
+def path_only_event(**kw):
+    return FileAccessEvent(
+        timestamp=NOW, path="/home/u/.ssh", pid=42, ppid=1, exe="/usr/libexec/localsearch-3",
+        comm="localsearch-3", success=True, backend="t", raw="raw", path_only=True, **kw,
+    )
+
+
+def test_o_path_open_is_allowed_without_allowlist_or_snapshot():
+    a = StubAllowlist(Verdict(False, None))
+    c, calls = make(a)
+    pe = c.process(path_only_event(inode=1, dev=2))
+    assert pe.verdict == Verdict(True, PATH_ONLY_RULE)
+    assert pe.snapshot is None and calls == [] and a.seen == []
+    assert pe.canonical_path == "/home/u/.ssh"
+
+
+def test_o_path_open_of_unverifiable_path_is_still_not_flagged():
+    """No read happened whatever the path really was; the record keeps it UNVERIFIED."""
+    def gone(p):
+        raise FileNotFoundError(p)
+
+    c, calls = make(StubAllowlist(Verdict(False, None)), stat_fn=gone)
+    pe = c.process(path_only_event(inode=1, dev=2))
+    assert pe.verdict == Verdict(True, PATH_ONLY_RULE) and calls == []
+    assert pe.canonical_path is None

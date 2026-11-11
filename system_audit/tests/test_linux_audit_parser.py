@@ -234,3 +234,97 @@ def _single_path_event(path_fields):
 def test_malformed_dev_is_none(fields):
     assert _single_path_event(fields + " inode=abc").dev is None
     assert _single_path_event(fields).inode is None
+
+
+# --- parent-directory identity (short-lived files, R54) ---------------------------------
+
+def _group(*paths, serial="9"):
+    return [
+        f'type=SYSCALL msg=audit(6.0:{serial}): success=yes pid=1 ppid=2 comm="gpg" '
+        f'exe="/usr/bin/gpg" key="credwatch"',
+        *(f"type=PATH msg=audit(6.0:{serial}): item={i} {p}" for i, p in enumerate(paths)),
+        f"type=EOE msg=audit(6.0:{serial}): ",
+    ]
+
+
+def test_fixture_create_event_carries_parent_identity_and_nametype():
+    events = run(AuditAssembler(), lines("audit_enriched.log"))
+    created = next(e for e in events if e.path == "/home/u/.ssh/id_new")
+    assert created.nametype == "CREATE"
+    assert (created.parent_inode, created.parent_dev) == (131080, os.makedev(0xFD, 0x01))
+
+
+def test_normal_open_has_no_parent_identity():
+    events = run(AuditAssembler(), lines("audit_enriched.log"))
+    read = next(e for e in events if e.path == "/home/u/.aws/credentials")
+    assert read.nametype == "NORMAL"
+    assert read.parent_inode is None and read.parent_dev is None
+
+
+def test_rename_within_one_dir_shares_parent_identity():
+    ls = _group(
+        'name="/h/.gnupg/" inode=50 dev=fd:01 nametype=PARENT',
+        'name="/h/.gnupg/" inode=50 dev=fd:01 nametype=PARENT',
+        'name="/h/.gnupg/pubring.kbx.tmp" inode=60 dev=fd:01 nametype=DELETE',
+        'name="/h/.gnupg/pubring.kbx" inode=61 dev=fd:01 nametype=CREATE',
+    )
+    events = run(AuditAssembler(), ls)
+    assert [(e.nametype, e.parent_inode) for e in events] == [("DELETE", 50), ("CREATE", 50)]
+
+
+def test_parents_in_different_dirs_give_no_parent_identity():
+    ls = _group(
+        'name="/a/" inode=50 dev=fd:01 nametype=PARENT',
+        'name="/b/" inode=51 dev=fd:01 nametype=PARENT',
+        'name="/a/x" inode=60 dev=fd:01 nametype=DELETE',
+        'name="/b/x" inode=60 dev=fd:01 nametype=CREATE',
+    )
+    events = run(AuditAssembler(), ls)
+    assert [(e.parent_inode, e.parent_dev) for e in events] == [(None, None), (None, None)]
+
+
+def test_parent_with_unparseable_dev_gives_no_parent_identity():
+    ls = _group(
+        'name="/a/" inode=50 dev=zz nametype=PARENT',
+        'name="/a/x" inode=60 dev=fd:01 nametype=CREATE',
+    )
+    (event,) = run(AuditAssembler(), ls)
+    assert event.parent_inode is None and event.parent_dev is None
+
+
+# --- O_PATH opens (location-only handles, R55) -------------------------------------------
+
+def _open_group(arch="c000003e", syscall="257", args="a0=ffffff9c a1=7ffd1000 a2=280000 a3=0"):
+    return [
+        f'type=SYSCALL msg=audit(7.0:11): arch={arch} syscall={syscall} success=yes {args} '
+        f'pid=1 ppid=2 comm="x" exe="/x" key="credwatch"',
+        'type=PATH msg=audit(7.0:11): item=0 name="/h/.ssh" inode=5 dev=fd:01 nametype=NORMAL',
+        "type=EOE msg=audit(7.0:11): ",
+    ]
+
+
+@pytest.mark.parametrize("arch,syscall,args", [
+    ("c000003e", "257", "a0=ffffff9c a1=7ffd1000 a2=280000 a3=0"),   # x86_64 openat
+    ("c000003e", "2", "a0=7ffd1000 a1=200000 a2=0 a3=0"),            # x86_64 open
+    ("c00000b7", "56", "a0=ffffff9c a1=7ffd1000 a2=200000 a3=0"),    # aarch64 openat
+])
+def test_o_path_open_marks_event_path_only(arch, syscall, args):
+    (event,) = run(AuditAssembler(), _open_group(arch, syscall, args))
+    assert event.path_only is True
+
+
+@pytest.mark.parametrize("arch,syscall,args", [
+    ("c000003e", "257", "a0=ffffff9c a1=7ffd1000 a2=80000 a3=0"),    # O_RDONLY|O_CLOEXEC
+    ("c000003e", "2", "a0=7ffd1000 a1=0 a2=200000 a3=0"),            # flag in the wrong arg
+    ("c000003e", "437", "a0=ffffff9c a1=7ffd1000 a2=7ffd2000 a3=18"),  # openat2: flags hidden
+    ("40000003", "295", "a0=ffffff9c a1=7ffd1000 a2=200000 a3=0"),   # i386: unknown table
+    ("c000003e", "257", "a0=ffffff9c a1=7ffd1000 a2=zz a3=0"),       # unparseable flags
+    ("c000003e", "257", "a0=ffffff9c a1=7ffd1000 a3=0"),             # flags missing
+])
+def test_non_o_path_or_unknown_open_is_judged_normally(arch, syscall, args):
+    (event,) = run(AuditAssembler(), _open_group(arch, syscall, args))
+    assert event.path_only is False
+
+
+def test_fixture_events_are_not_path_only():
+    assert not any(e.path_only for e in run(AuditAssembler(), lines("audit_enriched.log")))

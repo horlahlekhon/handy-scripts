@@ -18,6 +18,14 @@ class FileAccessEvent:
     raw: str
     inode: int | None = None
     dev: int | None = None
+    # Linux audit only: the PATH record's nametype (NORMAL/CREATE/DELETE/...) and the
+    # identity of the directory the name was created in or removed from (its PARENT record).
+    nametype: str | None = None
+    parent_inode: int | None = None
+    parent_dev: int | None = None
+    # Linux audit only: the open asked for a location-only (O_PATH) handle, which cannot
+    # read contents or list a directory. False whenever the flags are unknown.
+    path_only: bool = False
 
 
 @dataclass(frozen=True)

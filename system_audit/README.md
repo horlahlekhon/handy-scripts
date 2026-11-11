@@ -72,6 +72,18 @@ matches. Process matching is deliberately strict:
   canonical path only if its inode and device match what the kernel reported (R23).
   A symlink alias such as `~/.aws/link -> ~/.ssh/id_rsa` cannot borrow the `~/.aws`
   allowlist; unverifiable events are flagged and stored as "UNVERIFIED".
+  Exception (R54): a file the syscall itself created or deleted (audit `nametype`
+  CREATE/DELETE) that is already gone, such as gpg's lock and temp files, is
+  verified through its parent directory instead: the resolved parent must still have
+  the inode/dev of the audit PARENT record, and the allowlist then judges
+  `<resolved parent>/<name>`. A gone file from a plain open, a replaced file, or a
+  rename across two directories stays unverified.
+- Location-only opens (R55): an `open`/`openat` with `O_PATH` returns a handle that can
+  neither read a file nor list a directory. Such events are stored with rule
+  `o-path (no read access)` and never alerted. Turning the handle into a read needs a
+  new open (a file beneath it, or a `/proc/self/fd/N` re-open), which is audited and
+  judged normally; the e2e test checks both. `openat2` hides its flags from audit, so it
+  is always judged normally, as is any open whose flags cannot be parsed.
 - A deleted executable (`... (deleted)`) is flagged on purpose.
 
 **Decision for you: the default `~/.aws/**` rule allows `python3*`**, because the spec

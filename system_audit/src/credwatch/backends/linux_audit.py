@@ -98,6 +98,46 @@ def _parse_dev(value: str | None) -> int | None:
         return None
 
 
+_O_PATH = 0o10000000  # same value on x86_64 and aarch64
+# (audit arch, syscall number) -> SYSCALL argument holding the open flags. openat2 passes
+# its flags inside a struct audit does not log, so it is absent and judged normally (R55).
+_OPEN_FLAGS_ARG = {
+    ("c000003e", "2"): "a1",    # x86_64 open
+    ("c000003e", "257"): "a2",  # x86_64 openat
+    ("c00000b7", "56"): "a2",   # aarch64 openat
+}
+
+
+def _is_path_only_open(syscall: AuditRecord) -> bool:
+    """True only when the syscall is a known open whose flags parse and include O_PATH."""
+    arg = _OPEN_FLAGS_ARG.get((syscall.fields.get("arch"), syscall.fields.get("syscall")))
+    raw = syscall.fields.get(arg) if arg else None
+    if raw is None:
+        return False
+    try:
+        return bool(int(raw, 16) & _O_PATH)
+    except ValueError:
+        logger.debug("unparseable open flags %r; judged as a normal open", raw)
+        return False
+
+
+def _parent_identity(group: _Group) -> tuple[int, int] | None:
+    """(inode, dev) shared by every PARENT record of the group, else None.
+
+    A rename across directories has two different parents; we cannot tell which
+    name belongs to which, so it gets no parent identity (and stays fail-closed).
+    """
+    idents = {
+        (_to_int(r.fields.get("inode")), _parse_dev(r.fields.get("dev")))
+        for r in group.records
+        if r.type == "PATH" and r.fields.get("nametype") == "PARENT"
+    }
+    if len(idents) != 1:
+        return None
+    inode, dev = next(iter(idents))
+    return None if inode is None or dev is None else (inode, dev)
+
+
 def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
     syscall = next((r for r in group.records if r.type == "SYSCALL"), None)
     if syscall is None:
@@ -110,6 +150,8 @@ def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
     cwd = cwd_rec.fields.get("cwd") if cwd_rec else None
     raw = "\n".join(group.lines)
     timestamp = datetime.fromtimestamp(syscall.epoch, tz=timezone.utc)
+    parent = _parent_identity(group)
+    path_only = _is_path_only_open(syscall)
     events = []
     for rec in group.records:
         if rec.type != "PATH" or rec.fields.get("nametype") == "PARENT":
@@ -133,6 +175,10 @@ def _build_events(group: _Group, key: str) -> list[FileAccessEvent]:
                 raw=raw,
                 inode=_to_int(rec.fields.get("inode")),
                 dev=_parse_dev(rec.fields.get("dev")),
+                nametype=rec.fields.get("nametype"),
+                parent_inode=parent[0] if parent else None,
+                parent_dev=parent[1] if parent else None,
+                path_only=path_only,
             )
         )
     return events
